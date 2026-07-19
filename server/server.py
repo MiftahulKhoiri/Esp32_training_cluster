@@ -1,8 +1,9 @@
-# server.py — koordinator FedAvg + penyedia training data untuk 5 node ESP32
+# server.py — koordinator FedAvg + penyedia training data + deteksi training selesai
 from flask import Flask, request, Response
 import numpy as np
 import threading
 import struct
+import os
 
 app = Flask(__name__)
 
@@ -15,15 +16,31 @@ NUM_NODES = 5
 MAX_SAMPLES_PER_NODE = 300  # harus <= kapasitas buffer di ESP32
 
 PARAM_COUNT = (INPUT_DIM * HIDDEN_DIM + HIDDEN_DIM) + (HIDDEN_DIM * VOCAB_SIZE + VOCAB_SIZE)
+W1_SIZE = INPUT_DIM * HIDDEN_DIM
+B1_SIZE = HIDDEN_DIM
+W2_SIZE = HIDDEN_DIM * VOCAB_SIZE
+B2_SIZE = VOCAB_SIZE
+
+CHECKPOINT_DIR = "checkpoints"
+
+# ===== KRITERIA BERHENTI TRAINING =====
+# Nilai awal, sesuaikan kalau perlu: loss acak (uniform) untuk vocab 128 ~= ln(128) = 4.85
+TARGET_LOSS = 3.0
+MAX_ROUNDS = 50
+EVAL_HOLDOUT_FRACTION = 0.15  # 15% akhir corpus, tidak pernah dikirim ke node manapun
 
 # ===== STATE GLOBAL: WEIGHT =====
 lock = threading.Lock()
 global_weights = np.random.uniform(-0.1, 0.1, PARAM_COUNT).astype(np.float32)
 pending_updates = {}
 round_number = 0
+training_complete = False
+last_eval_loss = None
 
-# ===== STATE GLOBAL: TRAINING DATA (dimuat sekali saat startup) =====
-node_data = {}  # node_id -> (context_ids: np.uint8 [N, CONTEXT_LEN], target_ids: np.uint16 [N])
+# ===== STATE GLOBAL: DATA =====
+node_data = {}       # node_id -> (context_ids, target_ids)
+eval_context = None  # (N, CONTEXT_LEN) uint8 — khusus evaluasi, tidak dikirim ke node
+eval_target = None   # (N,) uint16
 
 
 def clean_text(text: str) -> str:
@@ -55,15 +72,72 @@ def make_samples(text: str, context_len: int, max_samples: int):
 
 
 def load_and_split_corpus(path="corpus.txt"):
+    global eval_context, eval_target
+
     with open(path, "r", encoding="utf-8") as f:
         raw = f.read()
     text = clean_text(raw)
-    chunks = split_corpus(text, NUM_NODES)
 
+    # Pisahkan dulu: sebagian besar depan untuk training node, 15% akhir untuk evaluasi
+    split_point = int(len(text) * (1.0 - EVAL_HOLDOUT_FRACTION))
+    train_text = text[:split_point]
+    eval_text = text[split_point:]
+
+    chunks = split_corpus(train_text, NUM_NODES)
     for node_id, chunk in enumerate(chunks, start=1):
         ctx, tgt = make_samples(chunk, CONTEXT_LEN, MAX_SAMPLES_PER_NODE)
         node_data[node_id] = (ctx, tgt)
-        print(f"[server] Node {node_id}: {len(tgt)} sample siap dikirim")
+        print(f"[server] Node {node_id}: {len(tgt)} sample training siap dikirim")
+
+    eval_context, eval_target = make_samples(eval_text, CONTEXT_LEN, 200)
+    print(f"[server] Eval set (holdout, tak pernah dikirim ke node): {len(eval_target)} sample")
+
+
+def relu(x):
+    return np.maximum(x, 0.0)
+
+
+def softmax_rows(x):
+    x = x - np.max(x, axis=1, keepdims=True)
+    e = np.exp(x)
+    return e / np.sum(e, axis=1, keepdims=True)
+
+
+def evaluate_loss(weights_flat: np.ndarray) -> float:
+    """Forward pass numpy, sama persis dengan dense_layer.h, dihitung di eval_context/eval_target."""
+    offset = 0
+    w1 = weights_flat[offset:offset + W1_SIZE].reshape(INPUT_DIM, HIDDEN_DIM); offset += W1_SIZE
+    b1 = weights_flat[offset:offset + B1_SIZE]; offset += B1_SIZE
+    w2 = weights_flat[offset:offset + W2_SIZE].reshape(HIDDEN_DIM, VOCAB_SIZE); offset += W2_SIZE
+    b2 = weights_flat[offset:offset + B2_SIZE]
+
+    x = eval_context.astype(np.float32) / VOCAB_SIZE  # (N, CONTEXT_LEN)
+    z1 = x @ w1 + b1
+    a1 = relu(z1)
+    z2 = a1 @ w2 + b2
+    probs = softmax_rows(z2)
+
+    n = len(eval_target)
+    p_correct = probs[np.arange(n), eval_target]
+    p_correct = np.clip(p_correct, 1e-7, None)
+    return float(np.mean(-np.log(p_correct)))
+
+
+def save_checkpoint(round_num: int, is_final: bool = False):
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+    round_path = os.path.join(CHECKPOINT_DIR, f"round_{round_num}.bin")
+    latest_path = os.path.join(CHECKPOINT_DIR, "latest.bin")
+
+    global_weights.tofile(round_path)
+    global_weights.tofile(latest_path)
+
+    if is_final:
+        final_path = os.path.join(CHECKPOINT_DIR, "final.bin")
+        global_weights.tofile(final_path)
+        print(f"[server] Checkpoint FINAL disimpan: {final_path}")
+
+    print(f"[server] Checkpoint disimpan: {round_path} (dan latest.bin)")
 
 
 @app.route("/get_training_data", methods=["GET"])
@@ -75,10 +149,9 @@ def get_training_data():
     ctx, tgt = node_data[node_id]
     num_samples = len(tgt)
 
-    # Format: [uint32 num_samples][context_ids uint8 flat][target_ids uint16]
     payload = struct.pack("<I", num_samples)
-    payload += ctx.tobytes()          # num_samples * CONTEXT_LEN byte
-    payload += tgt.tobytes()          # num_samples * 2 byte
+    payload += ctx.tobytes()
+    payload += tgt.tobytes()
 
     return Response(payload, mimetype="application/octet-stream")
 
@@ -90,13 +163,27 @@ def get_global_weights():
     return Response(payload, mimetype="application/octet-stream")
 
 
+# Endpoint ringan buat ESP32: cuma 1 byte (0 = masih training, 1 = sudah selesai).
+# Sengaja bukan JSON biar ESP32 tidak perlu parsing library tambahan.
+@app.route("/training_status_flag", methods=["GET"])
+def training_status_flag():
+    with lock:
+        flag = 1 if training_complete else 0
+    return Response(bytes([flag]), mimetype="application/octet-stream")
+
+
 @app.route("/upload_weights", methods=["POST"])
 def upload_weights():
-    global global_weights, pending_updates, round_number
+    global global_weights, pending_updates, round_number, training_complete, last_eval_loss
 
     node_id = request.args.get("node_id", type=int)
     if node_id is None or not (1 <= node_id <= NUM_NODES):
         return Response("node_id tidak valid", status=400)
+
+    with lock:
+        if training_complete:
+            # Training sudah selesai, tidak perlu proses weight lagi
+            return Response("TRAINING_COMPLETE", status=200)
 
     raw = request.get_data()
     expected_bytes = PARAM_COUNT * 4
@@ -115,7 +202,17 @@ def upload_weights():
             global_weights = np.mean(stacked, axis=0).astype(np.float32)
             pending_updates.clear()
             round_number += 1
-            print(f"[server] === FedAvg selesai, ronde global #{round_number} ===")
+
+            last_eval_loss = evaluate_loss(global_weights)
+            print(f"[server] === FedAvg ronde #{round_number} selesai, eval_loss = {last_eval_loss:.4f} ===")
+
+            is_done = (last_eval_loss <= TARGET_LOSS) or (round_number >= MAX_ROUNDS)
+            save_checkpoint(round_number, is_final=is_done)
+
+            if is_done:
+                training_complete = True
+                reason = "loss mencapai target" if last_eval_loss <= TARGET_LOSS else "mencapai MAX_ROUNDS"
+                print(f"[server] *** TRAINING SELESAI ({reason}) — checkpoint final.bin siap dites ***")
 
     return Response("OK", status=200)
 
@@ -128,6 +225,10 @@ def status():
             "nodes_reported_this_round": list(pending_updates.keys()),
             "param_count": PARAM_COUNT,
             "nodes_with_data": list(node_data.keys()),
+            "training_complete": training_complete,
+            "last_eval_loss": last_eval_loss,
+            "target_loss": TARGET_LOSS,
+            "max_rounds": MAX_ROUNDS,
         }
     return info
 
@@ -135,5 +236,6 @@ def status():
 if __name__ == "__main__":
     print(f"[server] PARAM_COUNT = {PARAM_COUNT}")
     load_and_split_corpus("corpus.txt")
+    print(f"[server] TARGET_LOSS={TARGET_LOSS}, MAX_ROUNDS={MAX_ROUNDS}")
     print(f"[server] Menunggu {NUM_NODES} node di /upload_weights")
     app.run(host="0.0.0.0", port=5000, threaded=True)
