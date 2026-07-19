@@ -100,10 +100,6 @@ public:
         return true;
     }
 
-    // Ambil training data node ini dari Pi.
-    // Format payload: [uint32 num_samples][context_ids uint8, num_samples*context_len]
-    //                 [target_ids uint16, num_samples]
-    // max_samples: batas aman kapasitas buffer ESP32 — kalau server kirim lebih, ditolak.
     static bool receive_training_data(
         const char* server_url,
         int node_id,
@@ -132,7 +128,6 @@ public:
 
         WiFiClient* stream = http.getStreamPtr();
 
-        // 1. Baca header: uint32 num_samples (4 byte, little-endian)
         uint8_t header_buf[4];
         size_t header_read = stream->readBytes(header_buf, 4);
         if (header_read != 4) {
@@ -150,7 +145,6 @@ public:
             return false;
         }
 
-        // 2. Baca context_ids (num_samples * context_len byte)
         size_t context_bytes = num_samples * context_len;
         out_context_ids.resize(context_bytes);
         size_t ctx_read = stream->readBytes(out_context_ids.data(), context_bytes);
@@ -160,7 +154,6 @@ public:
             return false;
         }
 
-        // 3. Baca target_ids (num_samples * 2 byte, uint16)
         size_t target_bytes = num_samples * sizeof(uint16_t);
         out_target_ids.resize(num_samples);
         size_t tgt_read = stream->readBytes(
@@ -176,6 +169,39 @@ public:
         out_num_samples = num_samples;
         Serial.print("[Comm] receive_training_data sukses, jumlah sample: ");
         Serial.println(num_samples);
+        return true;
+    }
+
+    // Cek status training ke Pi. Return true kalau polling berhasil (terlepas hasilnya),
+    // out_complete diisi true/false sesuai status training di server.
+    static bool check_training_complete(const char* server_url, bool& out_complete) {
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("[Comm] check_training_complete: WiFi belum konek");
+            return false;
+        }
+
+        HTTPClient http;
+        http.begin(server_url);
+        int code = http.GET();
+
+        if (code != 200) {
+            Serial.print("[Comm] check_training_complete gagal, HTTP code: ");
+            Serial.println(code);
+            http.end();
+            return false;
+        }
+
+        WiFiClient* stream = http.getStreamPtr();
+        uint8_t flag_byte = 0;
+        size_t read_len = stream->readBytes(&flag_byte, 1);
+        http.end();
+
+        if (read_len != 1) {
+            Serial.println("[Comm] check_training_complete: gagal baca flag");
+            return false;
+        }
+
+        out_complete = (flag_byte == 1);
         return true;
     }
 };
