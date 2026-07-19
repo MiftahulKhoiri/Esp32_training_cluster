@@ -1,52 +1,68 @@
 // main.ino — sketch utama, siklus federated learning per node
+// Sekarang IDENTIK di semua board — cuma NODE_ID yang beda per board.
 #include "matrix_ops.h"
 #include "dense_layer.h"
 #include "losses.h"
 #include "trainer.h"
 #include "comm.h"
 #include "status_led.h"
-#include "data_node1.h"  // GANTI: data_node2.h / data_node3.h / dst sesuai board ini
 
 // ===== KONFIGURASI — SESUAIKAN PER NODE =====
-const char* WIFI_SSID     = "Ap";
-const char* WIFI_PASSWORD = "1234567891";
-const char* PI_SERVER_UPLOAD  = "http://192.168.1.10:5000/upload_weights";
-const char* PI_SERVER_GLOBAL  = "http://192.168.1.10:5000/get_global_weights";
-const int   NODE_ID = 1; // GANTI: 1-5, beda tiap board, harus cocok dengan data_nodeN.h yang di-include
+const char* WIFI_SSID     = "GANTI_SSID";
+const char* WIFI_PASSWORD = "GANTI_PASSWORD";
+const char* PI_SERVER_UPLOAD   = "http://192.168.1.10:5000/upload_weights";
+const char* PI_SERVER_GLOBAL   = "http://192.168.1.10:5000/get_global_weights";
+const char* PI_SERVER_DATA     = "http://192.168.1.10:5000/get_training_data";
+const int   NODE_ID = 1; // GANTI: 1-5, beda tiap board — ini SATU-SATUNYA yang perlu diganti
 
-// ===== ARSITEKTUR MODEL =====
-const size_t CONTEXT_LEN  = 8;    // jumlah karakter konteks
-const size_t VOCAB_SIZE   = 128;  // ASCII dasar
+// ===== ARSITEKTUR MODEL — HARUS SAMA DENGAN server.py =====
+const size_t CONTEXT_LEN  = 8;
+const size_t VOCAB_SIZE   = 128;
 const size_t HIDDEN_DIM   = 64;
-const size_t INPUT_DIM    = CONTEXT_LEN; // id char dinormalisasi, bukan one-hot
+const size_t INPUT_DIM    = CONTEXT_LEN;
+const size_t MAX_SAMPLES  = 300; // batas aman buffer, harus >= MAX_SAMPLES_PER_NODE di server.py
 
 // ===== FEDERATED CONFIG =====
 const int    LOCAL_EPOCHS      = 3;
 const size_t BATCH_SIZE        = 8;
 const float  LEARNING_RATE     = 0.01f;
-const uint32_t ROUND_INTERVAL_MS = 30000; // jeda antar ronde federated
+const uint32_t ROUND_INTERVAL_MS = 30000;
 
 SimpleMLP model;
 Matrix train_inputs;
 std::vector<uint16_t> train_targets;
 size_t num_samples = 0;
 
-// Muat data corpus asli dari data_nodeN.h (hasil data_prep.py), disimpan di flash
-// lewat array const, lalu disalin ke Matrix (RAM) hanya untuk training.
-void load_local_data() {
-    num_samples = NODE_NUM_SAMPLES;
+// Ambil training data dari Pi (bukan dari flash lagi), lalu konversi ke Matrix.
+// Dipanggil sekali di setup() — data node ini tetap sama sepanjang sesi training
+// (kalau butuh refresh data, tinggal panggil ulang fungsi ini kapan saja).
+bool load_local_data() {
+    std::vector<uint8_t> context_ids;
+    std::vector<uint16_t> target_ids;
+
+    bool ok = Comm::receive_training_data(
+        PI_SERVER_DATA, NODE_ID, CONTEXT_LEN, MAX_SAMPLES,
+        num_samples, context_ids, target_ids
+    );
+    if (!ok) {
+        Serial.println("[main] Gagal ambil training data dari server");
+        return false;
+    }
+
     train_inputs = Matrix(num_samples, INPUT_DIM, 0.0f);
     train_targets.resize(num_samples);
 
     for (size_t i = 0; i < num_samples; ++i) {
         for (size_t c = 0; c < CONTEXT_LEN; ++c) {
-            train_inputs(i, c) = static_cast<float>(NODE_CONTEXT_IDS[i][c]) / VOCAB_SIZE;
+            uint8_t char_id = context_ids[i * CONTEXT_LEN + c];
+            train_inputs(i, c) = static_cast<float>(char_id) / VOCAB_SIZE;
         }
-        train_targets[i] = NODE_TARGET_IDS[i];
+        train_targets[i] = target_ids[i];
     }
 
-    Serial.print("[main] Data corpus dimuat, jumlah sample: ");
+    Serial.print("[main] Data dari server dimuat, jumlah sample: ");
     Serial.println(num_samples);
+    return true;
 }
 
 void build_model() {
@@ -60,7 +76,6 @@ void build_model() {
 bool run_federated_round() {
     size_t param_count = model.total_param_count();
 
-    // 1. Ambil weight global terbaru dari Pi
     StatusLed::working();
     std::vector<float> global_weights;
     if (!Comm::receive_global_weights(PI_SERVER_GLOBAL, global_weights, param_count)) {
@@ -76,7 +91,6 @@ bool run_federated_round() {
         return false;
     }
 
-    // 2. Training lokal beberapa epoch — LED tetap nyala sepanjang training
     float final_loss = Trainer::train_local_epochs(
         model, train_inputs, train_targets.data(), num_samples,
         LOCAL_EPOCHS, BATCH_SIZE, LEARNING_RATE
@@ -84,7 +98,6 @@ bool run_federated_round() {
     Serial.print("[main] Selesai training lokal, loss akhir: ");
     Serial.println(final_loss);
 
-    // 3. Kirim weight hasil training balik ke Pi
     std::vector<float> local_weights;
     model.get_weights_flat(local_weights);
     if (!Comm::send_weights(PI_SERVER_UPLOAD, NODE_ID, local_weights)) {
@@ -94,7 +107,7 @@ bool run_federated_round() {
         return false;
     }
 
-    StatusLed::idle(); // ronde selesai sukses, kembali idle sampai ronde berikutnya
+    StatusLed::idle();
     return true;
 }
 
@@ -104,10 +117,9 @@ void setup() {
     Serial.println("[main] Boot node federated learning");
 
     StatusLed::init();
-    randomSeed(analogRead(0)); // seed random biar tiap board beda
+    randomSeed(analogRead(0));
 
     build_model();
-    load_local_data();
 
     StatusLed::working();
     if (!Comm::connect_wifi(WIFI_SSID, WIFI_PASSWORD)) {
@@ -116,6 +128,14 @@ void setup() {
         delay(3000);
         ESP.restart();
     }
+
+    // Ambil data training dari server, retry sampai berhasil (butuh WiFi & data)
+    while (!load_local_data()) {
+        Serial.println("[main] Retry ambil training data dalam 5 detik...");
+        StatusLed::blink_error();
+        delay(5000);
+    }
+
     StatusLed::idle();
 }
 
