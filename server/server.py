@@ -4,6 +4,7 @@ import numpy as np
 import threading
 import struct
 import os
+import math
 
 app = Flask(__name__)
 
@@ -13,7 +14,7 @@ VOCAB_SIZE = 128
 HIDDEN_DIM = 64
 INPUT_DIM = CONTEXT_LEN
 NUM_NODES = 5
-MAX_SAMPLES_PER_NODE = 300  # harus <= kapasitas buffer di ESP32
+MAX_SAMPLES_PER_NODE = 300
 
 PARAM_COUNT = (INPUT_DIM * HIDDEN_DIM + HIDDEN_DIM) + (HIDDEN_DIM * VOCAB_SIZE + VOCAB_SIZE)
 W1_SIZE = INPUT_DIM * HIDDEN_DIM
@@ -24,10 +25,13 @@ B2_SIZE = VOCAB_SIZE
 CHECKPOINT_DIR = "checkpoints"
 
 # ===== KRITERIA BERHENTI TRAINING =====
-# Nilai awal, sesuaikan kalau perlu: loss acak (uniform) untuk vocab 128 ~= ln(128) = 4.85
 TARGET_LOSS = 3.0
 MAX_ROUNDS = 50
-EVAL_HOLDOUT_FRACTION = 0.15  # 15% akhir corpus, tidak pernah dikirim ke node manapun
+EVAL_HOLDOUT_FRACTION = 0.15
+
+# Baseline loss teoretis kalau model tebak acak (uniform) dari VOCAB_SIZE kelas —
+# dipakai sebagai titik awal 0% buat progress bar loss
+BASELINE_LOSS = math.log(VOCAB_SIZE)
 
 # ===== STATE GLOBAL: WEIGHT =====
 lock = threading.Lock()
@@ -38,9 +42,9 @@ training_complete = False
 last_eval_loss = None
 
 # ===== STATE GLOBAL: DATA =====
-node_data = {}       # node_id -> (context_ids, target_ids)
-eval_context = None  # (N, CONTEXT_LEN) uint8 — khusus evaluasi, tidak dikirim ke node
-eval_target = None   # (N,) uint16
+node_data = {}
+eval_context = None
+eval_target = None
 
 
 def clean_text(text: str) -> str:
@@ -78,7 +82,6 @@ def load_and_split_corpus(path="corpus.txt"):
         raw = f.read()
     text = clean_text(raw)
 
-    # Pisahkan dulu: sebagian besar depan untuk training node, 15% akhir untuk evaluasi
     split_point = int(len(text) * (1.0 - EVAL_HOLDOUT_FRACTION))
     train_text = text[:split_point]
     eval_text = text[split_point:]
@@ -104,14 +107,13 @@ def softmax_rows(x):
 
 
 def evaluate_loss(weights_flat: np.ndarray) -> float:
-    """Forward pass numpy, sama persis dengan dense_layer.h, dihitung di eval_context/eval_target."""
     offset = 0
     w1 = weights_flat[offset:offset + W1_SIZE].reshape(INPUT_DIM, HIDDEN_DIM); offset += W1_SIZE
     b1 = weights_flat[offset:offset + B1_SIZE]; offset += B1_SIZE
     w2 = weights_flat[offset:offset + W2_SIZE].reshape(HIDDEN_DIM, VOCAB_SIZE); offset += W2_SIZE
     b2 = weights_flat[offset:offset + B2_SIZE]
 
-    x = eval_context.astype(np.float32) / VOCAB_SIZE  # (N, CONTEXT_LEN)
+    x = eval_context.astype(np.float32) / VOCAB_SIZE
     z1 = x @ w1 + b1
     a1 = relu(z1)
     z2 = a1 @ w2 + b2
@@ -121,6 +123,26 @@ def evaluate_loss(weights_flat: np.ndarray) -> float:
     p_correct = probs[np.arange(n), eval_target]
     p_correct = np.clip(p_correct, 1e-7, None)
     return float(np.mean(-np.log(p_correct)))
+
+
+def make_progress_bar(fraction: float, width: int = 24) -> str:
+    fraction = max(0.0, min(1.0, fraction))
+    filled = int(round(fraction * width))
+    bar = "█" * filled + "-" * (width - filled)
+    return f"[{bar}] {fraction * 100:5.1f}%"
+
+
+def print_progress(round_num: int, eval_loss: float):
+    round_fraction = round_num / MAX_ROUNDS
+
+    # Progress loss: 0% di BASELINE_LOSS (tebak acak), 100% di TARGET_LOSS atau lebih rendah
+    if BASELINE_LOSS > TARGET_LOSS:
+        loss_fraction = (BASELINE_LOSS - eval_loss) / (BASELINE_LOSS - TARGET_LOSS)
+    else:
+        loss_fraction = 1.0 if eval_loss <= TARGET_LOSS else 0.0
+
+    print(f"[server] Ronde   {round_num:3d}/{MAX_ROUNDS}  {make_progress_bar(round_fraction)}")
+    print(f"[server] Loss    {eval_loss:.4f} -> target {TARGET_LOSS}  {make_progress_bar(loss_fraction)}")
 
 
 def save_checkpoint(round_num: int, is_final: bool = False):
@@ -163,8 +185,6 @@ def get_global_weights():
     return Response(payload, mimetype="application/octet-stream")
 
 
-# Endpoint ringan buat ESP32: cuma 1 byte (0 = masih training, 1 = sudah selesai).
-# Sengaja bukan JSON biar ESP32 tidak perlu parsing library tambahan.
 @app.route("/training_status_flag", methods=["GET"])
 def training_status_flag():
     with lock:
@@ -182,7 +202,6 @@ def upload_weights():
 
     with lock:
         if training_complete:
-            # Training sudah selesai, tidak perlu proses weight lagi
             return Response("TRAINING_COMPLETE", status=200)
 
     raw = request.get_data()
@@ -204,7 +223,8 @@ def upload_weights():
             round_number += 1
 
             last_eval_loss = evaluate_loss(global_weights)
-            print(f"[server] === FedAvg ronde #{round_number} selesai, eval_loss = {last_eval_loss:.4f} ===")
+            print(f"[server] === FedAvg ronde #{round_number} selesai ===")
+            print_progress(round_number, last_eval_loss)
 
             is_done = (last_eval_loss <= TARGET_LOSS) or (round_number >= MAX_ROUNDS)
             save_checkpoint(round_number, is_final=is_done)
@@ -236,6 +256,6 @@ def status():
 if __name__ == "__main__":
     print(f"[server] PARAM_COUNT = {PARAM_COUNT}")
     load_and_split_corpus("corpus.txt")
-    print(f"[server] TARGET_LOSS={TARGET_LOSS}, MAX_ROUNDS={MAX_ROUNDS}")
+    print(f"[server] TARGET_LOSS={TARGET_LOSS}, MAX_ROUNDS={MAX_ROUNDS}, BASELINE_LOSS={BASELINE_LOSS:.4f}")
     print(f"[server] Menunggu {NUM_NODES} node di /upload_weights")
     app.run(host="0.0.0.0", port=5000, threaded=True)
