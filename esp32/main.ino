@@ -1,5 +1,4 @@
 // main.ino — sketch utama, siklus federated learning per node
-// Sekarang IDENTIK di semua board — cuma NODE_ID yang beda per board.
 #include "matrix_ops.h"
 #include "dense_layer.h"
 #include "losses.h"
@@ -11,31 +10,31 @@
 const char* WIFI_SSID     = "GANTI_SSID";
 const char* WIFI_PASSWORD = "GANTI_PASSWORD";
 const char* PI_SERVER_UPLOAD   = "http://192.168.1.10:5000/upload_weights";
-const char* PI_SERVER_GLOBAL   = "http://192.168.1.10:5000/get_global_weights";
-const char* PI_SERVER_DATA     = "http://192.168.1.10:5000/get_training_data";
-const int   NODE_ID = 1; // GANTI: 1-5, beda tiap board — ini SATU-SATUNYA yang perlu diganti
+const char* PI_SERVER_GLOBAL    = "http://192.168.1.10:5000/get_global_weights";
+const char* PI_SERVER_DATA      = "http://192.168.1.10:5000/get_training_data";
+const char* PI_SERVER_STATUS    = "http://192.168.1.10:5000/training_status_flag";
+const int   NODE_ID = 1; // GANTI: 1-5, beda tiap board
 
 // ===== ARSITEKTUR MODEL — HARUS SAMA DENGAN server.py =====
 const size_t CONTEXT_LEN  = 8;
 const size_t VOCAB_SIZE   = 128;
 const size_t HIDDEN_DIM   = 64;
 const size_t INPUT_DIM    = CONTEXT_LEN;
-const size_t MAX_SAMPLES  = 300; // batas aman buffer, harus >= MAX_SAMPLES_PER_NODE di server.py
+const size_t MAX_SAMPLES  = 300;
 
 // ===== FEDERATED CONFIG =====
 const int    LOCAL_EPOCHS      = 3;
 const size_t BATCH_SIZE        = 8;
 const float  LEARNING_RATE     = 0.01f;
 const uint32_t ROUND_INTERVAL_MS = 30000;
+const uint32_t STATUS_CHECK_INTERVAL_MS = 10000; // interval cek status saat sudah idle selesai
 
 SimpleMLP model;
 Matrix train_inputs;
 std::vector<uint16_t> train_targets;
 size_t num_samples = 0;
+bool training_finished = false; // flag lokal, sekali true tidak training lagi
 
-// Ambil training data dari Pi (bukan dari flash lagi), lalu konversi ke Matrix.
-// Dipanggil sekali di setup() — data node ini tetap sama sepanjang sesi training
-// (kalau butuh refresh data, tinggal panggil ulang fungsi ini kapan saja).
 bool load_local_data() {
     std::vector<uint8_t> context_ids;
     std::vector<uint16_t> target_ids;
@@ -129,7 +128,6 @@ void setup() {
         ESP.restart();
     }
 
-    // Ambil data training dari server, retry sampai berhasil (butuh WiFi & data)
     while (!load_local_data()) {
         Serial.println("[main] Retry ambil training data dalam 5 detik...");
         StatusLed::blink_error();
@@ -140,6 +138,28 @@ void setup() {
 }
 
 void loop() {
+    // Cek status training dulu sebelum mulai ronde baru
+    bool is_complete = false;
+    bool status_ok = Comm::check_training_complete(PI_SERVER_STATUS, is_complete);
+
+    if (status_ok && is_complete) {
+        if (!training_finished) {
+            // Baru pertama kali terdeteksi selesai — kasih tanda LED sekali
+            Serial.println("[main] *** TRAINING SELESAI menurut server — berhenti training, node idle ***");
+            StatusLed::training_done();
+            training_finished = true;
+        }
+        StatusLed::idle();
+        delay(STATUS_CHECK_INTERVAL_MS); // tetap polling berkala kalau-kalau training di-restart
+        return;
+    }
+
+    if (status_ok && !is_complete && training_finished) {
+        // Server ternyata mulai training lagi (mis. di-restart admin) — lanjut lagi
+        Serial.println("[main] Training di server aktif lagi, node lanjut ikut training");
+        training_finished = false;
+    }
+
     Serial.println("[main] === Mulai ronde federated ===");
     run_federated_round();
     Serial.print("[main] Ronde selesai, tunggu ");
