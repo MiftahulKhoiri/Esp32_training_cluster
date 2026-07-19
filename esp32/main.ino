@@ -4,11 +4,12 @@
 #include "losses.h"
 #include "trainer.h"
 #include "comm.h"
+#include "status_led.h"
 #include "data_node1.h"  // GANTI: data_node2.h / data_node3.h / dst sesuai board ini
 
 // ===== KONFIGURASI — SESUAIKAN PER NODE =====
-const char* WIFI_SSID     = "GANTI_SSID";
-const char* WIFI_PASSWORD = "GANTI_PASSWORD";
+const char* WIFI_SSID     = "Ap";
+const char* WIFI_PASSWORD = "1234567891";
 const char* PI_SERVER_UPLOAD  = "http://192.168.1.10:5000/upload_weights";
 const char* PI_SERVER_GLOBAL  = "http://192.168.1.10:5000/get_global_weights";
 const int   NODE_ID = 1; // GANTI: 1-5, beda tiap board, harus cocok dengan data_nodeN.h yang di-include
@@ -60,17 +61,22 @@ bool run_federated_round() {
     size_t param_count = model.total_param_count();
 
     // 1. Ambil weight global terbaru dari Pi
+    StatusLed::working();
     std::vector<float> global_weights;
     if (!Comm::receive_global_weights(PI_SERVER_GLOBAL, global_weights, param_count)) {
         Serial.println("[main] Gagal ambil global weight, skip ronde ini");
+        StatusLed::blink_error();
+        StatusLed::idle();
         return false;
     }
     if (!model.set_weights_flat(global_weights)) {
         Serial.println("[main] Gagal set weight ke model");
+        StatusLed::blink_error();
+        StatusLed::idle();
         return false;
     }
 
-    // 2. Training lokal beberapa epoch
+    // 2. Training lokal beberapa epoch — LED tetap nyala sepanjang training
     float final_loss = Trainer::train_local_epochs(
         model, train_inputs, train_targets.data(), num_samples,
         LOCAL_EPOCHS, BATCH_SIZE, LEARNING_RATE
@@ -83,9 +89,12 @@ bool run_federated_round() {
     model.get_weights_flat(local_weights);
     if (!Comm::send_weights(PI_SERVER_UPLOAD, NODE_ID, local_weights)) {
         Serial.println("[main] Gagal kirim weight ke Pi");
+        StatusLed::blink_error();
+        StatusLed::idle();
         return false;
     }
 
+    StatusLed::idle(); // ronde selesai sukses, kembali idle sampai ronde berikutnya
     return true;
 }
 
@@ -94,16 +103,20 @@ void setup() {
     delay(1000);
     Serial.println("[main] Boot node federated learning");
 
+    StatusLed::init();
     randomSeed(analogRead(0)); // seed random biar tiap board beda
 
     build_model();
     load_local_data();
 
+    StatusLed::working();
     if (!Comm::connect_wifi(WIFI_SSID, WIFI_PASSWORD)) {
         Serial.println("[main] WiFi gagal, restart ESP32...");
+        StatusLed::blink_error();
         delay(3000);
         ESP.restart();
     }
+    StatusLed::idle();
 }
 
 void loop() {
