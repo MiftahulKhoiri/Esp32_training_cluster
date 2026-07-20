@@ -1,0 +1,5 @@
+cd server/cpp_tokenizer
+pip install pybind11 --break-system-packages   # kalau belum ada
+mkdir build && cd build
+cmake ..
+make
