@@ -13,14 +13,12 @@ const char* PI_SERVER_UPLOAD   = "http://192.168.1.10:5000/upload_weights";
 const char* PI_SERVER_GLOBAL    = "http://192.168.1.10:5000/get_global_weights";
 const char* PI_SERVER_DATA      = "http://192.168.1.10:5000/get_training_data";
 const char* PI_SERVER_STATUS    = "http://192.168.1.10:5000/training_status_flag";
+const char* PI_SERVER_VOCAB     = "http://192.168.1.10:5000/vocab_size";
 const int   NODE_ID = 1; // GANTI: 1-5, beda tiap board
 
-// ===== ARSITEKTUR MODEL — HARUS SAMA DENGAN src/config.py =====
-// PENTING: VOCAB_SIZE di sini harus sama dengan vocab_size AKTUAL tokenizer
-// (dicetak server saat training tokenizer) — bukan cuma target 200, karena
-// vocab aktual bisa lebih kecil kalau corpus kehabisan pair layak merge.
-const size_t CONTEXT_LEN  = 8;    // sekarang satuannya TOKEN BPE, bukan karakter
-const size_t VOCAB_SIZE   = 200;  // GANTI sesuai vocab_size aktual dari log server
+// ===== ARSITEKTUR MODEL =====
+const size_t CONTEXT_LEN  = 8;    // satuan TOKEN BPE, bukan karakter
+size_t VOCAB_SIZE = 0;             // BUKAN const lagi — diisi dari fetch_vocab_size() di setup()
 const size_t HIDDEN_DIM   = 64;
 const size_t INPUT_DIM    = CONTEXT_LEN;
 const size_t MAX_SAMPLES  = 300;
@@ -39,7 +37,7 @@ size_t num_samples = 0;
 bool training_finished = false;
 
 bool load_local_data() {
-    std::vector<uint16_t> context_ids;  // uint16 sekarang, token id BPE bisa >255
+    std::vector<uint16_t> context_ids;
     std::vector<uint16_t> target_ids;
 
     bool ok = Comm::receive_training_data(
@@ -121,8 +119,6 @@ void setup() {
     StatusLed::init();
     randomSeed(analogRead(0));
 
-    build_model();
-
     StatusLed::working();
     if (!Comm::connect_wifi(WIFI_SSID, WIFI_PASSWORD)) {
         Serial.println("[main] WiFi gagal, restart ESP32...");
@@ -130,6 +126,16 @@ void setup() {
         delay(3000);
         ESP.restart();
     }
+
+    // Ambil vocab_size AKTUAL dari server dulu — WAJIB sebelum build_model(),
+    // karena ukuran layer output model bergantung ke angka ini.
+    while (!Comm::fetch_vocab_size(PI_SERVER_VOCAB, VOCAB_SIZE) || VOCAB_SIZE == 0) {
+        Serial.println("[main] Retry ambil vocab_size dalam 5 detik...");
+        StatusLed::blink_error();
+        delay(5000);
+    }
+
+    build_model(); // sekarang aman, VOCAB_SIZE sudah terisi dari server
 
     while (!load_local_data()) {
         Serial.println("[main] Retry ambil training data dalam 5 detik...");
