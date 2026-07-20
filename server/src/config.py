@@ -1,8 +1,8 @@
 # src/config.py — konstanta konfigurasi, harus sama persis dengan main.ino di ESP32
 import math
 
-CONTEXT_LEN = 8
-VOCAB_SIZE = 128
+CONTEXT_LEN = 8       # sekarang satuannya TOKEN (hasil BPE), bukan karakter lagi
+VOCAB_SIZE = 200       # target vocab BPE (vocab_size aktual bisa < ini, dicetak saat training tokenizer)
 HIDDEN_DIM = 64
 INPUT_DIM = CONTEXT_LEN
 NUM_NODES = 5
@@ -14,7 +14,7 @@ B1_SIZE = HIDDEN_DIM
 W2_SIZE = HIDDEN_DIM * VOCAB_SIZE
 B2_SIZE = VOCAB_SIZE
 
-CHECKPOINT_DIR = "checkpoints"
+MODEL_DIR = "model"
 CORPUS_PATH = "data/corpus.txt"
 
 # ===== KRITERIA BERHENTI TRAINING =====
