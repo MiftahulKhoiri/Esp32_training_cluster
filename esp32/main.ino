@@ -15,9 +15,12 @@ const char* PI_SERVER_DATA      = "http://192.168.1.10:5000/get_training_data";
 const char* PI_SERVER_STATUS    = "http://192.168.1.10:5000/training_status_flag";
 const int   NODE_ID = 1; // GANTI: 1-5, beda tiap board
 
-// ===== ARSITEKTUR MODEL — HARUS SAMA DENGAN server.py =====
-const size_t CONTEXT_LEN  = 8;
-const size_t VOCAB_SIZE   = 128;
+// ===== ARSITEKTUR MODEL — HARUS SAMA DENGAN src/config.py =====
+// PENTING: VOCAB_SIZE di sini harus sama dengan vocab_size AKTUAL tokenizer
+// (dicetak server saat training tokenizer) — bukan cuma target 200, karena
+// vocab aktual bisa lebih kecil kalau corpus kehabisan pair layak merge.
+const size_t CONTEXT_LEN  = 8;    // sekarang satuannya TOKEN BPE, bukan karakter
+const size_t VOCAB_SIZE   = 200;  // GANTI sesuai vocab_size aktual dari log server
 const size_t HIDDEN_DIM   = 64;
 const size_t INPUT_DIM    = CONTEXT_LEN;
 const size_t MAX_SAMPLES  = 300;
@@ -27,16 +30,16 @@ const int    LOCAL_EPOCHS      = 3;
 const size_t BATCH_SIZE        = 8;
 const float  LEARNING_RATE     = 0.01f;
 const uint32_t ROUND_INTERVAL_MS = 30000;
-const uint32_t STATUS_CHECK_INTERVAL_MS = 10000; // interval cek status saat sudah idle selesai
+const uint32_t STATUS_CHECK_INTERVAL_MS = 10000;
 
 SimpleMLP model;
 Matrix train_inputs;
 std::vector<uint16_t> train_targets;
 size_t num_samples = 0;
-bool training_finished = false; // flag lokal, sekali true tidak training lagi
+bool training_finished = false;
 
 bool load_local_data() {
-    std::vector<uint8_t> context_ids;
+    std::vector<uint16_t> context_ids;  // uint16 sekarang, token id BPE bisa >255
     std::vector<uint16_t> target_ids;
 
     bool ok = Comm::receive_training_data(
@@ -53,8 +56,8 @@ bool load_local_data() {
 
     for (size_t i = 0; i < num_samples; ++i) {
         for (size_t c = 0; c < CONTEXT_LEN; ++c) {
-            uint8_t char_id = context_ids[i * CONTEXT_LEN + c];
-            train_inputs(i, c) = static_cast<float>(char_id) / VOCAB_SIZE;
+            uint16_t token_id = context_ids[i * CONTEXT_LEN + c];
+            train_inputs(i, c) = static_cast<float>(token_id) / VOCAB_SIZE;
         }
         train_targets[i] = target_ids[i];
     }
@@ -138,24 +141,21 @@ void setup() {
 }
 
 void loop() {
-    // Cek status training dulu sebelum mulai ronde baru
     bool is_complete = false;
     bool status_ok = Comm::check_training_complete(PI_SERVER_STATUS, is_complete);
 
     if (status_ok && is_complete) {
         if (!training_finished) {
-            // Baru pertama kali terdeteksi selesai — kasih tanda LED sekali
             Serial.println("[main] *** TRAINING SELESAI menurut server — berhenti training, node idle ***");
             StatusLed::training_done();
             training_finished = true;
         }
         StatusLed::idle();
-        delay(STATUS_CHECK_INTERVAL_MS); // tetap polling berkala kalau-kalau training di-restart
+        delay(STATUS_CHECK_INTERVAL_MS);
         return;
     }
 
     if (status_ok && !is_complete && training_finished) {
-        // Server ternyata mulai training lagi (mis. di-restart admin) — lanjut lagi
         Serial.println("[main] Training di server aktif lagi, node lanjut ikut training");
         training_finished = false;
     }
