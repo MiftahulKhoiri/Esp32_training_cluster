@@ -78,6 +78,9 @@ public:
         return code == 200;
     }
 
+    // POST minta pointer non-const (uint8_t*), padahal weights.data() dari
+    // const std::vector<float>& itu const float*. const_cast aman di sini karena
+    // HTTPClient::POST() cuma MEMBACA buffer buat dikirim, tidak pernah menulisinya.
     static bool send_weights(const char* server_url, int node_id, const std::vector<float>& weights) {
         if (WiFi.status() != WL_CONNECTED) {
             Serial.println("[Comm] send_weights: WiFi belum konek");
@@ -90,7 +93,7 @@ public:
         http.addHeader("Content-Type", "application/octet-stream");
 
         int code = http.POST(
-            reinterpret_cast<const uint8_t*>(weights.data()),
+            reinterpret_cast<uint8_t*>(const_cast<float*>(weights.data())),
             weights.size() * sizeof(float)
         );
 
