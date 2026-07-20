@@ -1,11 +1,12 @@
 # src/routes.py — endpoint HTTP: training data, weight global, upload weight, status
 from flask import Blueprint, request, Response
 import numpy as np
+import struct
 
 from src import config, state
 from src.model import evaluate_loss
 from src.progress import print_progress
-from src.checkpoint import save_checkpoint
+from src.checkpoint import save_model
 
 bp = Blueprint("routes", __name__)
 
@@ -19,7 +20,6 @@ def get_training_data():
     ctx, tgt = state.node_data[node_id]
     num_samples = len(tgt)
 
-    import struct
     payload = struct.pack("<I", num_samples)
     payload += ctx.tobytes()
     payload += tgt.tobytes()
@@ -74,12 +74,12 @@ def upload_weights():
             print_progress(state.round_number, state.last_eval_loss)
 
             is_done = (state.last_eval_loss <= config.TARGET_LOSS) or (state.round_number >= config.MAX_ROUNDS)
-            save_checkpoint(state.round_number, is_final=is_done)
+            saved_path = save_model(is_final=is_done)
 
             if is_done:
                 state.training_complete = True
                 reason = "loss mencapai target" if state.last_eval_loss <= config.TARGET_LOSS else "mencapai MAX_ROUNDS"
-                print(f"[server] *** TRAINING SELESAI ({reason}) — checkpoint final.bin siap dites ***")
+                print(f"[server] *** TRAINING SELESAI ({reason}) — model final: {saved_path} ***")
 
     return Response("OK", status=200)
 
