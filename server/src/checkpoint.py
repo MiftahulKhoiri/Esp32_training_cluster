@@ -1,20 +1,32 @@
-# src/checkpoint.py — simpan global_weights ke file, termasuk penanda final
+# src/checkpoint.py — simpan model gabungan (hasil FedAvg) ke folder model/, nama auto-increment
 import os
+import re
 from src import config, state
 
+MODEL_DIR = "model"
+MODEL_NAME_PATTERN = re.compile(r"^model(\d+)\.bin$")
 
-def save_checkpoint(round_num: int, is_final: bool = False):
-    os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
 
-    round_path = os.path.join(config.CHECKPOINT_DIR, f"round_{round_num}.bin")
-    latest_path = os.path.join(config.CHECKPOINT_DIR, "latest.bin")
+def _next_model_path() -> str:
+    os.makedirs(MODEL_DIR, exist_ok=True)
 
-    state.global_weights.tofile(round_path)
-    state.global_weights.tofile(latest_path)
+    existing_numbers = []
+    for filename in os.listdir(MODEL_DIR):
+        match = MODEL_NAME_PATTERN.match(filename)
+        if match:
+            existing_numbers.append(int(match.group(1)))
+
+    next_number = (max(existing_numbers) + 1) if existing_numbers else 1
+    return os.path.join(MODEL_DIR, f"model{next_number}.bin")
+
+
+def save_model(is_final: bool = False) -> str:
+    path = _next_model_path()
+    state.global_weights.tofile(path)
 
     if is_final:
-        final_path = os.path.join(config.CHECKPOINT_DIR, "final.bin")
-        state.global_weights.tofile(final_path)
-        print(f"[server] Checkpoint FINAL disimpan: {final_path}")
+        print(f"[server] Model FINAL disimpan: {path}")
+    else:
+        print(f"[server] Model disimpan: {path}")
 
-    print(f"[server] Checkpoint disimpan: {round_path} (dan latest.bin)")
+    return path
