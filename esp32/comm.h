@@ -1,4 +1,3 @@
-
 // comm.h — WiFi + HTTP komunikasi ke Pi (versi ESP32/Arduino)
 #pragma once
 #include <WiFi.h>
@@ -26,9 +25,6 @@ public:
         return true;
     }
 
-    // Ambil vocab_size AKTUAL dari server (hasil training tokenizer), dipanggil
-    // sekali di setup() SEBELUM build_model(). Ini yang bikin VOCAB_SIZE otomatis
-    // selalu cocok dengan server tanpa perlu edit manual tiap retrain tokenizer.
     static bool fetch_vocab_size(const char* server_url, size_t& out_vocab_size) {
         if (WiFi.status() != WL_CONNECTED) {
             Serial.println("[Comm] fetch_vocab_size: WiFi belum konek");
@@ -62,6 +58,24 @@ public:
         Serial.print("[Comm] fetch_vocab_size sukses, vocab_size = ");
         Serial.println(vs);
         return true;
+    }
+
+    // Kirim heartbeat ke server — dipanggil tiap iterasi loop(), terlepas dari
+    // sedang training atau idle. Sengaja tidak Serial.println tiap kali gagal,
+    // karena ini dipanggil sangat sering — kalau WiFi putus sementara, tidak
+    // perlu banjiri Serial Monitor.
+    static bool send_heartbeat(const char* server_url, int node_id) {
+        if (WiFi.status() != WL_CONNECTED) {
+            return false;
+        }
+
+        HTTPClient http;
+        String url = String(server_url) + "?node_id=" + String(node_id);
+        http.begin(url);
+        int code = http.GET();
+        http.end();
+
+        return code == 200;
     }
 
     static bool send_weights(const char* server_url, int node_id, const std::vector<float>& weights) {
