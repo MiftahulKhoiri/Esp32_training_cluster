@@ -5,11 +5,10 @@ import numpy as np
 
 from src import config, state
 
-# Tambah path build C++ tokenizer ke sys.path, lalu import module hasil pybind11
 _CPP_BUILD_DIR = os.path.join(os.path.dirname(__file__), "..", "cpp_tokenizer", "build")
 sys.path.append(_CPP_BUILD_DIR)
 
-import bpe_tokenizer_py as bpe  # noqa: E402  (import setelah sys.path.append, sengaja)
+import bpe_tokenizer_py as bpe  # noqa: E402
 
 TOKENIZER_SAVE_PATH = "model/tokenizer.bin"
 
@@ -33,7 +32,6 @@ def make_samples_from_tokens(token_ids: list, context_len: int, max_samples: int
         targets.append(token_ids[i + context_len])
         if len(contexts) >= max_samples:
             break
-    # uint16 (bukan uint8 lagi) — token id BPE bisa >255 walau kita batasi vocab kecil
     return np.array(contexts, dtype=np.uint16), np.array(targets, dtype=np.uint16)
 
 
@@ -47,21 +45,27 @@ def load_and_split_corpus(path: str = None):
     train_text = raw_text[:split_point]
     eval_text = raw_text[split_point:]
 
-    # Latih tokenizer HANYA dari train_text — eval_text tetap benar-benar tidak
-    # pernah dilihat, baik oleh node maupun oleh proses training tokenizer-nya sendiri.
     tokenizer = bpe.BPETokenizer()
-    tokenizer.train(train_text, config.VOCAB_SIZE)
+    tokenizer.train(train_text, config.VOCAB_SIZE_TARGET)
     actual_vocab_size = tokenizer.vocab_size()
-    print(f"[server] Tokenizer dilatih, vocab_size aktual = {actual_vocab_size} "
-          f"(target = {config.VOCAB_SIZE})")
+    print(f"[server] Tokenizer dilatih, vocab_size AKTUAL = {actual_vocab_size} "
+          f"(target = {config.VOCAB_SIZE_TARGET})")
+
+    # ===== Set up state runtime berdasar vocab_size AKTUAL, bukan target tetap =====
+    state.vocab_size = actual_vocab_size
+    state.param_sizes = config.compute_param_sizes(actual_vocab_size)
+    state.baseline_loss = config.compute_baseline_loss(actual_vocab_size)
+    state.global_weights = np.random.uniform(
+        -0.1, 0.1, state.param_sizes["PARAM_COUNT"]
+    ).astype(np.float32)
+    print(f"[server] PARAM_COUNT (dihitung dari vocab aktual) = {state.param_sizes['PARAM_COUNT']}")
 
     os.makedirs(os.path.dirname(TOKENIZER_SAVE_PATH), exist_ok=True)
     tokenizer.save(TOKENIZER_SAVE_PATH)
     print(f"[server] Tokenizer disimpan: {TOKENIZER_SAVE_PATH}")
 
-    state.tokenizer = tokenizer  # disimpan di state, siapa tahu dibutuhkan endpoint lain nanti
+    state.tokenizer = tokenizer
 
-    # Split train_text per node (kontigu, tetap non-IID), lalu encode tiap potongan
     chunks = split_corpus(train_text, config.NUM_NODES)
     for node_id, chunk in enumerate(chunks, start=1):
         token_ids = tokenizer.encode(chunk)
