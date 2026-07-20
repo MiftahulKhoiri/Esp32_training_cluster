@@ -1,17 +1,21 @@
-# src/state.py — state global bersama, dimutasi langsung lewat module attribute
-# (bukan pakai keyword `global` lintas modul — assignment ke state.xxx sudah cukup)
+# src/state.py — state global; vocab_size & param_sizes baru terisi SETELAH
+# tokenizer selesai training (lihat data_loader.load_and_split_corpus)
 import threading
-import numpy as np
-from src import config
 
 lock = threading.Lock()
 
-global_weights = np.random.uniform(-0.1, 0.1, config.PARAM_COUNT).astype(np.float32)
-pending_updates = {}   # node_id -> np.array weight
+vocab_size = None       # int, diisi = tokenizer.vocab_size() aktual
+param_sizes = None      # dict dari config.compute_param_sizes(vocab_size)
+baseline_loss = None    # float, dari config.compute_baseline_loss(vocab_size)
+
+global_weights = None   # np.ndarray, diinisialisasi random SETELAH vocab_size diketahui
+pending_updates = {}
 round_number = 0
 training_complete = False
 last_eval_loss = None
 
-node_data = {}          # node_id -> (context_ids, target_ids)
-eval_context = None     # (N, CONTEXT_LEN) uint8 — holdout, tak pernah dikirim ke node
-eval_target = None      # (N,) uint16
+node_data = {}
+eval_context = None
+eval_target = None
+
+tokenizer = None
