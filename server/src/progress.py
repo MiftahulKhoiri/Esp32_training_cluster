@@ -1,5 +1,5 @@
 # src/progress.py — progress bar ASCII ke arah MAX_ROUNDS dan TARGET_LOSS
-from src import config
+from src import config, state
 
 
 def make_progress_bar(fraction: float, width: int = 24) -> str:
@@ -12,8 +12,8 @@ def make_progress_bar(fraction: float, width: int = 24) -> str:
 def print_progress(round_num: int, eval_loss: float):
     round_fraction = round_num / config.MAX_ROUNDS
 
-    if config.BASELINE_LOSS > config.TARGET_LOSS:
-        loss_fraction = (config.BASELINE_LOSS - eval_loss) / (config.BASELINE_LOSS - config.TARGET_LOSS)
+    if state.baseline_loss > config.TARGET_LOSS:
+        loss_fraction = (state.baseline_loss - eval_loss) / (state.baseline_loss - config.TARGET_LOSS)
     else:
         loss_fraction = 1.0 if eval_loss <= config.TARGET_LOSS else 0.0
 
