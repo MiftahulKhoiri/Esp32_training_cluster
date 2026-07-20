@@ -1,10 +1,13 @@
-# test_model.py — load checkpoint hasil federated training, tes prediksi karakter berikutnya
+# test_model.py — load model hasil federated training, tes prediksi karakter berikutnya
 # Cara pakai:
-#   python test_model.py checkpoints/latest.bin "A: Pagi! U"
+#   python test_model.py model/model7.bin "A: Pagi! U"
+#   python test_model.py model "A: Pagi! U"        <- otomatis pilih modelN.bin terbesar di folder
 import sys
+import os
+import re
 import numpy as np
 
-# ===== HARUS SAMA PERSIS DENGAN main.ino & server.py =====
+# ===== HARUS SAMA PERSIS DENGAN main.ino & src/config.py di server =====
 CONTEXT_LEN = 8
 VOCAB_SIZE = 128
 HIDDEN_DIM = 64
@@ -16,11 +19,35 @@ W2_SIZE = HIDDEN_DIM * VOCAB_SIZE
 B2_SIZE = VOCAB_SIZE
 PARAM_COUNT = W1_SIZE + B1_SIZE + W2_SIZE + B2_SIZE
 
+MODEL_NAME_PATTERN = re.compile(r"^model(\d+)\.bin$")
 
-def load_checkpoint(path: str):
+
+def resolve_model_path(path_arg: str) -> str:
+    """Kalau path_arg adalah folder, otomatis pilih modelN.bin dengan N terbesar
+    (model terbaru/final) di dalamnya. Kalau path_arg adalah file, dipakai langsung."""
+    if os.path.isdir(path_arg):
+        candidates = []
+        for filename in os.listdir(path_arg):
+            match = MODEL_NAME_PATTERN.match(filename)
+            if match:
+                candidates.append((int(match.group(1)), filename))
+
+        if not candidates:
+            raise FileNotFoundError(f"Tidak ada file modelN.bin di folder: {path_arg}")
+
+        candidates.sort()
+        latest_number, latest_filename = candidates[-1]
+        resolved = os.path.join(path_arg, latest_filename)
+        print(f"[test_model] Folder diberikan, otomatis pilih model terbaru: {resolved}")
+        return resolved
+
+    return path_arg
+
+
+def load_model(path: str):
     flat = np.fromfile(path, dtype=np.float32)
     if flat.size != PARAM_COUNT:
-        raise ValueError(f"Ukuran checkpoint tidak cocok: dapat {flat.size}, harusnya {PARAM_COUNT}")
+        raise ValueError(f"Ukuran model tidak cocok: dapat {flat.size}, harusnya {PARAM_COUNT}")
 
     offset = 0
     w1 = flat[offset:offset + W1_SIZE].reshape(INPUT_DIM, HIDDEN_DIM); offset += W1_SIZE
@@ -77,13 +104,15 @@ def generate(context_text: str, w1, b1, w2, b2, length=30):
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Cara pakai: python test_model.py <checkpoint.bin> \"<teks_konteks>\"")
+        print("Cara pakai:")
+        print('  python test_model.py model/model7.bin "A: Pagi! U"')
+        print('  python test_model.py model "A: Pagi! U"   (otomatis pilih model terbesar)')
         sys.exit(1)
 
-    checkpoint_path = sys.argv[1]
+    model_path = resolve_model_path(sys.argv[1])
     context_text = sys.argv[2]
 
-    w1, b1, w2, b2 = load_checkpoint(checkpoint_path)
+    w1, b1, w2, b2 = load_model(model_path)
 
     probs, used_context = forward(context_text, w1, b1, w2, b2)
     print(f"Konteks dipakai (setelah padding/potong ke {CONTEXT_LEN} char): '{used_context}'")
