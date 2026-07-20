@@ -1,0 +1,9 @@
+# src/app.py — factory Flask app, daftarkan blueprint routes
+from flask import Flask
+from src.routes import bp
+
+
+def create_app() -> Flask:
+    app = Flask(__name__)
+    app.register_blueprint(bp)
+    return app
