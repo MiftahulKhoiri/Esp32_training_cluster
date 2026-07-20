@@ -1,26 +1,35 @@
-# src/config.py — konstanta konfigurasi, harus sama persis dengan main.ino di ESP32
+# src/config.py — konstanta tetap + fungsi hitung ukuran param dari vocab_size aktual
 import math
 
-CONTEXT_LEN = 8       # sekarang satuannya TOKEN (hasil BPE), bukan karakter lagi
-VOCAB_SIZE = 200       # target vocab BPE (vocab_size aktual bisa < ini, dicetak saat training tokenizer)
+CONTEXT_LEN = 8              # satuan TOKEN BPE, bukan karakter
+VOCAB_SIZE_TARGET = 200      # target training tokenizer — vocab AKTUAL ada di state.vocab_size
 HIDDEN_DIM = 64
 INPUT_DIM = CONTEXT_LEN
 NUM_NODES = 5
 MAX_SAMPLES_PER_NODE = 300
 
-PARAM_COUNT = (INPUT_DIM * HIDDEN_DIM + HIDDEN_DIM) + (HIDDEN_DIM * VOCAB_SIZE + VOCAB_SIZE)
-W1_SIZE = INPUT_DIM * HIDDEN_DIM
-B1_SIZE = HIDDEN_DIM
-W2_SIZE = HIDDEN_DIM * VOCAB_SIZE
-B2_SIZE = VOCAB_SIZE
-
 MODEL_DIR = "model"
 CORPUS_PATH = "data/corpus.txt"
 
-# ===== KRITERIA BERHENTI TRAINING =====
 TARGET_LOSS = 3.0
 MAX_ROUNDS = 50
 EVAL_HOLDOUT_FRACTION = 0.15
 
-# Baseline loss teoretis kalau model tebak acak (uniform) dari VOCAB_SIZE kelas
-BASELINE_LOSS = math.log(VOCAB_SIZE)
+
+def compute_param_sizes(vocab_size: int) -> dict:
+    """Ukuran parameter model, dihitung dari vocab_size AKTUAL (bukan target tetap)."""
+    w1_size = INPUT_DIM * HIDDEN_DIM
+    b1_size = HIDDEN_DIM
+    w2_size = HIDDEN_DIM * vocab_size
+    b2_size = vocab_size
+    return {
+        "W1_SIZE": w1_size,
+        "B1_SIZE": b1_size,
+        "W2_SIZE": w2_size,
+        "B2_SIZE": b2_size,
+        "PARAM_COUNT": w1_size + b1_size + w2_size + b2_size,
+    }
+
+
+def compute_baseline_loss(vocab_size: int) -> float:
+    return math.log(vocab_size)
