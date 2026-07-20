@@ -15,6 +15,12 @@ TARGET_LOSS = 3.0
 MAX_ROUNDS = 50
 EVAL_HOLDOUT_FRACTION = 0.15
 
+# Tambahan di src/config.py, setelah EVAL_HOLDOUT_FRACTION:
+
+# ===== HEARTBEAT & TIMEOUT (deteksi node aktif) =====
+HEARTBEAT_TIMEOUT_SEC = 90     # node dianggap MATI kalau tidak heartbeat dalam waktu ini
+ROUND_TIMEOUT_SEC = 120        # maksimal tunggu 1 ronde sebelum FedAvg dipaksa jalan
+MIN_NODES_FOR_FEDAVG = 2       # minimal node yang harus lapor sebelum timeout boleh trigger FedAvg
 
 def compute_param_sizes(vocab_size: int) -> dict:
     """Ukuran parameter model, dihitung dari vocab_size AKTUAL (bukan target tetap)."""
