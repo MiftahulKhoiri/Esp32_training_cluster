@@ -100,13 +100,16 @@ public:
         return true;
     }
 
+    // context_ids sekarang uint16_t (bukan uint8_t) — token id hasil BPE tidak lagi
+    // otomatis muat di 1 byte walau vocab dibatasi kecil (~200), beda dari char-level
+    // lama yang selalu <256.
     static bool receive_training_data(
         const char* server_url,
         int node_id,
         size_t context_len,
         size_t max_samples,
         size_t& out_num_samples,
-        std::vector<uint8_t>& out_context_ids,
+        std::vector<uint16_t>& out_context_ids,
         std::vector<uint16_t>& out_target_ids
     ) {
         if (WiFi.status() != WL_CONNECTED) {
@@ -145,9 +148,12 @@ public:
             return false;
         }
 
-        size_t context_bytes = num_samples * context_len;
-        out_context_ids.resize(context_bytes);
-        size_t ctx_read = stream->readBytes(out_context_ids.data(), context_bytes);
+        // context_ids sekarang uint16 per elemen -> byte-nya 2x context_len per sample
+        size_t context_bytes = num_samples * context_len * sizeof(uint16_t);
+        out_context_ids.resize(num_samples * context_len);
+        size_t ctx_read = stream->readBytes(
+            reinterpret_cast<uint8_t*>(out_context_ids.data()), context_bytes
+        );
         if (ctx_read != context_bytes) {
             Serial.println("[Comm] receive_training_data: baca context_ids tidak lengkap");
             http.end();
@@ -172,8 +178,6 @@ public:
         return true;
     }
 
-    // Cek status training ke Pi. Return true kalau polling berhasil (terlepas hasilnya),
-    // out_complete diisi true/false sesuai status training di server.
     static bool check_training_complete(const char* server_url, bool& out_complete) {
         if (WiFi.status() != WL_CONNECTED) {
             Serial.println("[Comm] check_training_complete: WiFi belum konek");
