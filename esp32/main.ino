@@ -9,16 +9,17 @@
 // ===== KONFIGURASI — SESUAIKAN PER NODE =====
 const char* WIFI_SSID     = "GANTI_SSID";
 const char* WIFI_PASSWORD = "GANTI_PASSWORD";
-const char* PI_SERVER_UPLOAD   = "http://192.168.1.10:5000/upload_weights";
+const char* PI_SERVER_UPLOAD    = "http://192.168.1.10:5000/upload_weights";
 const char* PI_SERVER_GLOBAL    = "http://192.168.1.10:5000/get_global_weights";
 const char* PI_SERVER_DATA      = "http://192.168.1.10:5000/get_training_data";
 const char* PI_SERVER_STATUS    = "http://192.168.1.10:5000/training_status_flag";
 const char* PI_SERVER_VOCAB     = "http://192.168.1.10:5000/vocab_size";
+const char* PI_SERVER_HEARTBEAT = "http://192.168.1.10:5000/heartbeat";
 const int   NODE_ID = 1; // GANTI: 1-5, beda tiap board
 
 // ===== ARSITEKTUR MODEL =====
-const size_t CONTEXT_LEN  = 8;    // satuan TOKEN BPE, bukan karakter
-size_t VOCAB_SIZE = 0;             // BUKAN const lagi — diisi dari fetch_vocab_size() di setup()
+const size_t CONTEXT_LEN  = 8;
+size_t VOCAB_SIZE = 0;
 const size_t HIDDEN_DIM   = 64;
 const size_t INPUT_DIM    = CONTEXT_LEN;
 const size_t MAX_SAMPLES  = 300;
@@ -127,15 +128,13 @@ void setup() {
         ESP.restart();
     }
 
-    // Ambil vocab_size AKTUAL dari server dulu — WAJIB sebelum build_model(),
-    // karena ukuran layer output model bergantung ke angka ini.
     while (!Comm::fetch_vocab_size(PI_SERVER_VOCAB, VOCAB_SIZE) || VOCAB_SIZE == 0) {
         Serial.println("[main] Retry ambil vocab_size dalam 5 detik...");
         StatusLed::blink_error();
         delay(5000);
     }
 
-    build_model(); // sekarang aman, VOCAB_SIZE sudah terisi dari server
+    build_model();
 
     while (!load_local_data()) {
         Serial.println("[main] Retry ambil training data dalam 5 detik...");
@@ -143,10 +142,16 @@ void setup() {
         delay(5000);
     }
 
+    Comm::send_heartbeat(PI_SERVER_HEARTBEAT, NODE_ID); // kabari server: node ini hidup, dari awal
+
     StatusLed::idle();
 }
 
 void loop() {
+    // Heartbeat SELALU dikirim tiap loop, terlepas status training — ini yang
+    // bikin server tahu node ini masih hidup walau lagi idle nunggu ronde lain.
+    Comm::send_heartbeat(PI_SERVER_HEARTBEAT, NODE_ID);
+
     bool is_complete = false;
     bool status_ok = Comm::check_training_complete(PI_SERVER_STATUS, is_complete);
 
