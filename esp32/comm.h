@@ -1,3 +1,4 @@
+
 // comm.h — WiFi + HTTP komunikasi ke Pi (versi ESP32/Arduino)
 #pragma once
 #include <WiFi.h>
@@ -22,6 +23,44 @@ public:
         Serial.println();
         Serial.print("[Comm] Terhubung, IP: ");
         Serial.println(WiFi.localIP());
+        return true;
+    }
+
+    // Ambil vocab_size AKTUAL dari server (hasil training tokenizer), dipanggil
+    // sekali di setup() SEBELUM build_model(). Ini yang bikin VOCAB_SIZE otomatis
+    // selalu cocok dengan server tanpa perlu edit manual tiap retrain tokenizer.
+    static bool fetch_vocab_size(const char* server_url, size_t& out_vocab_size) {
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("[Comm] fetch_vocab_size: WiFi belum konek");
+            return false;
+        }
+
+        HTTPClient http;
+        http.begin(server_url);
+        int code = http.GET();
+
+        if (code != 200) {
+            Serial.print("[Comm] fetch_vocab_size gagal, HTTP code: ");
+            Serial.println(code);
+            http.end();
+            return false;
+        }
+
+        WiFiClient* stream = http.getStreamPtr();
+        uint8_t buf[2];
+        size_t read_len = stream->readBytes(buf, 2);
+        http.end();
+
+        if (read_len != 2) {
+            Serial.println("[Comm] fetch_vocab_size: gagal baca payload");
+            return false;
+        }
+
+        uint16_t vs = 0;
+        memcpy(&vs, buf, 2);
+        out_vocab_size = vs;
+        Serial.print("[Comm] fetch_vocab_size sukses, vocab_size = ");
+        Serial.println(vs);
         return true;
     }
 
@@ -100,9 +139,6 @@ public:
         return true;
     }
 
-    // context_ids sekarang uint16_t (bukan uint8_t) — token id hasil BPE tidak lagi
-    // otomatis muat di 1 byte walau vocab dibatasi kecil (~200), beda dari char-level
-    // lama yang selalu <256.
     static bool receive_training_data(
         const char* server_url,
         int node_id,
@@ -148,7 +184,6 @@ public:
             return false;
         }
 
-        // context_ids sekarang uint16 per elemen -> byte-nya 2x context_len per sample
         size_t context_bytes = num_samples * context_len * sizeof(uint16_t);
         out_context_ids.resize(num_samples * context_len);
         size_t ctx_read = stream->readBytes(
