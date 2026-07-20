@@ -1,5 +1,6 @@
 // main.ino — sketch utama, siklus federated learning per node
-#include <WiFi.h>        // <-- TAMBAHAN: biar ArduinoDroid link library WiFi
+#include <WiFi.h>       
+// <-- TAMBAHAN: biar ArduinoDroid link library WiFi
 #include <HTTPClient.h>
 #include "matrix_ops.h"
 #include "dense_layer.h"
