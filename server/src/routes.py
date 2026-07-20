@@ -1,4 +1,4 @@
-# src/routes.py — endpoint HTTP: training data, weight global, upload weight, status
+# src/routes.py — endpoint HTTP: vocab_size, training data, weight global, upload weight, status
 from flask import Blueprint, request, Response
 import numpy as np
 import struct
@@ -9,6 +9,14 @@ from src.progress import print_progress
 from src.checkpoint import save_model
 
 bp = Blueprint("routes", __name__)
+
+
+@bp.route("/vocab_size", methods=["GET"])
+def vocab_size_endpoint():
+    with state.lock:
+        vs = state.vocab_size if state.vocab_size is not None else 0
+    payload = struct.pack("<H", vs)  # uint16 little-endian, 2 byte
+    return Response(payload, mimetype="application/octet-stream")
 
 
 @bp.route("/get_training_data", methods=["GET"])
@@ -52,7 +60,7 @@ def upload_weights():
             return Response("TRAINING_COMPLETE", status=200)
 
     raw = request.get_data()
-    expected_bytes = config.PARAM_COUNT * 4
+    expected_bytes = state.param_sizes["PARAM_COUNT"] * 4
     if len(raw) != expected_bytes:
         print(f"[server] node {node_id}: ukuran payload salah, dapat {len(raw)}, harusnya {expected_bytes}")
         return Response("ukuran payload tidak cocok", status=400)
@@ -90,7 +98,8 @@ def status():
         info = {
             "round_number": state.round_number,
             "nodes_reported_this_round": list(state.pending_updates.keys()),
-            "param_count": config.PARAM_COUNT,
+            "vocab_size": state.vocab_size,
+            "param_count": state.param_sizes["PARAM_COUNT"] if state.param_sizes else None,
             "nodes_with_data": list(state.node_data.keys()),
             "training_complete": state.training_complete,
             "last_eval_loss": state.last_eval_loss,
