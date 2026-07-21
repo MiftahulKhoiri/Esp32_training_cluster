@@ -70,15 +70,20 @@ public:
         return true;
     }
 
-    // Plain SGD, sama seperti versi Pi — optimizer lebih canggih dipegang trainer
+    // Plain SGD, in-place — TIDAK lagi bikin copy penuh weight_grad_/bias_grad_
+    // (wg_scaled/bg_scaled) sebelum ini. Untuk layer dengan VOCAB_SIZE besar,
+    // weight_grad_ bisa puluhan KB — copy penuh tiap update() (dipanggil tiap
+    // batch, sangat sering) adalah beban heap sementara yang signifikan dan
+    // rawan bikin fragmentasi/abort() di tengah training panjang. Update
+    // langsung ke data_ elementwise menghindari alokasi sama sekali di sini.
     void update(float lr) {
-        Matrix wg_scaled = weight_grad_;
-        wg_scaled.scale_inplace(lr);
-        weights_.add_inplace(negate(wg_scaled));
+        auto& w = weights_.data();
+        auto& wg = weight_grad_.data();
+        for (size_t i = 0; i < w.size(); ++i) w[i] -= lr * wg[i];
 
-        Matrix bg_scaled = bias_grad_;
-        bg_scaled.scale_inplace(lr);
-        bias_.add_inplace(negate(bg_scaled));
+        auto& b = bias_.data();
+        auto& bg = bias_grad_.data();
+        for (size_t i = 0; i < b.size(); ++i) b[i] -= lr * bg[i];
     }
 
 private:
@@ -91,11 +96,6 @@ private:
     Matrix last_input_;
     Matrix last_z_;
     Matrix last_output_;
-
-    static Matrix negate(Matrix m) {
-        m.scale_inplace(-1.0f);
-        return m;
-    }
 
     Matrix apply_activation(const Matrix& z) {
         Matrix out(z.rows(), z.cols());
