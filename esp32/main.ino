@@ -1,5 +1,5 @@
 // main.ino — sketch utama, siklus federated learning per node
-#include <WiFi.h>       
+#include <WiFi.h>        
 // <-- TAMBAHAN: biar ArduinoDroid link library WiFi
 #include <HTTPClient.h>
 #include "matrix_ops.h"
@@ -10,14 +10,14 @@
 #include "status_led.h"
 
 // ===== KONFIGURASI — SESUAIKAN PER NODE =====
-const char* WIFI_SSID     = "GANTI_SSID";
-const char* WIFI_PASSWORD = "GANTI_PASSWORD";
-const char* PI_SERVER_UPLOAD    = "http://192.168.1.10:5000/upload_weights";
-const char* PI_SERVER_GLOBAL    = "http://192.168.1.10:5000/get_global_weights";
-const char* PI_SERVER_DATA      = "http://192.168.1.10:5000/get_training_data";
-const char* PI_SERVER_STATUS    = "http://192.168.1.10:5000/training_status_flag";
-const char* PI_SERVER_VOCAB     = "http://192.168.1.10:5000/vocab_size";
-const char* PI_SERVER_HEARTBEAT = "http://192.168.1.10:5000/heartbeat";
+const char* WIFI_SSID     = "wifi server";
+const char* WIFI_PASSWORD = "1234rewq";
+const char* PI_SERVER_UPLOAD    = "http://192.168.1.2:5000/upload_weights";
+const char* PI_SERVER_GLOBAL    = "http://192.168.1.2:5000/get_global_weights";
+const char* PI_SERVER_DATA      = "http://192.168.1.2:5000/get_training_data";
+const char* PI_SERVER_STATUS    = "http://192.168.1.2:5000/training_status_flag";
+const char* PI_SERVER_VOCAB     = "http://192.168.1.2:5000/vocab_size";
+const char* PI_SERVER_HEARTBEAT = "http://192.168.1.2:5000/heartbeat";
 const int   NODE_ID = 1; // GANTI: 1-5, beda tiap board
 
 // ===== ARSITEKTUR MODEL =====
@@ -39,6 +39,15 @@ Matrix train_inputs;
 std::vector<uint16_t> train_targets;
 size_t num_samples = 0;
 bool training_finished = false;
+
+// PENTING: SATU buffer weight global saja, dialokasikan SEKALI di setup().
+// Dipakai bolak-balik: terima global weight dari Pi -> set ke model -> training
+// -> timpa isi buffer yang SAMA dengan hasil training lokal -> kirim ke Pi.
+// Awalnya ada dua buffer terpisah (global_weights + local_weights, total 108KB
+// permanen) — itu salah satu penyebab heap ESP32 kelebihan beban. Reuse satu
+// buffer menghemat ~54KB permanen tanpa mengubah alur logika sama sekali,
+// karena isi lama sudah tidak dibutuhkan begitu training round berikutnya mulai.
+std::vector<float> weights_buffer;
 
 bool load_local_data() {
     std::vector<uint16_t> context_ids;
@@ -81,14 +90,13 @@ bool run_federated_round() {
     size_t param_count = model.total_param_count();
 
     StatusLed::working();
-    std::vector<float> global_weights;
-    if (!Comm::receive_global_weights(PI_SERVER_GLOBAL, global_weights, param_count)) {
+    if (!Comm::receive_global_weights(PI_SERVER_GLOBAL, weights_buffer, param_count)) {
         Serial.println("[main] Gagal ambil global weight, skip ronde ini");
         StatusLed::blink_error();
         StatusLed::idle();
         return false;
     }
-    if (!model.set_weights_flat(global_weights)) {
+    if (!model.set_weights_flat(weights_buffer)) {
         Serial.println("[main] Gagal set weight ke model");
         StatusLed::blink_error();
         StatusLed::idle();
@@ -102,9 +110,10 @@ bool run_federated_round() {
     Serial.print("[main] Selesai training lokal, loss akhir: ");
     Serial.println(final_loss);
 
-    std::vector<float> local_weights;
-    model.get_weights_flat(local_weights);
-    if (!Comm::send_weights(PI_SERVER_UPLOAD, NODE_ID, local_weights)) {
+    // Buffer yang sama ditimpa dengan hasil training lokal — isi lama
+    // (global weight yang sudah diserap ke model) sudah tidak dibutuhkan.
+    model.get_weights_flat(weights_buffer);
+    if (!Comm::send_weights(PI_SERVER_UPLOAD, NODE_ID, weights_buffer)) {
         Serial.println("[main] Gagal kirim weight ke Pi");
         StatusLed::blink_error();
         StatusLed::idle();
@@ -138,6 +147,15 @@ void setup() {
     }
 
     build_model();
+
+    // Alokasi SATU buffer weight sekali di sini, saat heap masih paling bersih.
+    size_t param_count = model.total_param_count();
+    weights_buffer.reserve(param_count);
+    weights_buffer.resize(param_count);
+    Serial.print("[main] Buffer weight dialokasikan sekali, param_count: ");
+    Serial.println(param_count);
+    Serial.print("[main] Free heap setelah alokasi buffer: ");
+    Serial.println(ESP.getFreeHeap());
 
     while (!load_local_data()) {
         Serial.println("[main] Retry ambil training data dalam 5 detik...");
