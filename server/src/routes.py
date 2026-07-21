@@ -3,6 +3,8 @@ from flask import Blueprint, request, Response
 import numpy as np
 import struct
 import time
+import os
+import threading
 
 from src import config, state
 from src.model import evaluate_loss
@@ -11,6 +13,14 @@ from src.checkpoint import save_model
 from src.heartbeat import record_heartbeat, count_active_nodes, get_active_node_ids
 
 bp = Blueprint("routes", __name__)
+
+
+def _shutdown_after_delay(delay_sec=3):
+    # Jalan di thread terpisah supaya response HTTP terakhir (ke node yang
+    # baru upload weight) sempat terkirim dulu sebelum proses dimatikan paksa.
+    time.sleep(delay_sec)
+    print("[server] Auto-shutdown: training selesai, program dihentikan.")
+    os._exit(0)
 
 
 @bp.route("/heartbeat", methods=["GET"])
@@ -120,6 +130,8 @@ def upload_weights():
                 state.training_complete = True
                 reason = "loss mencapai target" if state.last_eval_loss <= config.TARGET_LOSS else "mencapai MAX_ROUNDS"
                 print(f"[server] *** TRAINING SELESAI ({reason}) — model final: {saved_path} ***")
+                print("[server] Program akan berhenti otomatis dalam 3 detik...")
+                threading.Thread(target=_shutdown_after_delay, daemon=True).start()
 
     return Response("OK", status=200)
 
