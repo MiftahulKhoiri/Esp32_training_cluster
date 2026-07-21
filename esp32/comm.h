@@ -139,7 +139,18 @@ public:
             return false;
         }
 
+        // --- DEBUG: cek heap sebelum alokasi besar ---
+        Serial.print("[Comm][DEBUG] Free heap SEBELUM resize (butuh ");
+        Serial.print(expected_bytes);
+        Serial.print(" byte kontigu): ");
+        Serial.println(ESP.getFreeHeap());
+
         out.resize(expected_count);
+
+        Serial.print("[Comm][DEBUG] Free heap SETELAH resize: ");
+        Serial.println(ESP.getFreeHeap());
+        // --- END DEBUG ---
+
         size_t bytes_read = stream->readBytes(
             reinterpret_cast<uint8_t*>(out.data()),
             expected_bytes
