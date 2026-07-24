@@ -1,8 +1,9 @@
-// comm.h — WiFi + HTTP komunikasi ke Pi (versi ESP32/Arduino)
+// comm.h — WiFi + HTTP komunikasi ke Pi (versi komputasi paralel matmul)
 #pragma once
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <vector>
+#include "matrix_ops.h"
 
 class Comm {
 public:
@@ -25,65 +26,60 @@ public:
         return true;
     }
 
-    static bool fetch_vocab_size(const char* server_url, size_t& out_vocab_size) {
+    // Ambil matriks dari server, isi langsung ke Matrix `out`
+    // (out harus sudah dialokasikan sebelumnya lewat konstruktor Matrix(rows,cols)).
+    static bool fetch_matrix(const char* url, Matrix& out) {
         if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("[Comm] fetch_vocab_size: WiFi belum konek");
+            Serial.println("[Comm] fetch_matrix: WiFi belum konek");
             return false;
         }
 
         HTTPClient http;
-        http.begin(server_url);
+        http.begin(url);
         int code = http.GET();
 
         if (code != 200) {
-            Serial.print("[Comm] fetch_vocab_size gagal, HTTP code: ");
+            Serial.print("[Comm] fetch_matrix gagal, HTTP code: ");
             Serial.println(code);
             http.end();
             return false;
         }
 
         WiFiClient* stream = http.getStreamPtr();
-        uint8_t buf[2];
-        size_t read_len = stream->readBytes(buf, 2);
-        http.end();
+        int content_len = http.getSize();
+        size_t expected_bytes = out.size() * sizeof(float);
 
-        if (read_len != 2) {
-            Serial.println("[Comm] fetch_vocab_size: gagal baca payload");
+        if (content_len != (int)expected_bytes) {
+            Serial.print("[Comm] fetch_matrix: ukuran payload tidak cocok, dapat ");
+            Serial.print(content_len);
+            Serial.print(" byte, harusnya ");
+            Serial.println(expected_bytes);
+            http.end();
             return false;
         }
 
-        uint16_t vs = 0;
-        memcpy(&vs, buf, 2);
-        out_vocab_size = vs;
-        Serial.print("[Comm] fetch_vocab_size sukses, vocab_size = ");
-        Serial.println(vs);
+        size_t bytes_read = stream->readBytes(
+            reinterpret_cast<uint8_t*>(out.data().data()), expected_bytes
+        );
+        http.end();
+
+        if (bytes_read != expected_bytes) {
+            Serial.println("[Comm] fetch_matrix: baca stream tidak lengkap");
+            return false;
+        }
+
+        Serial.println("[Comm] fetch_matrix sukses");
         return true;
     }
 
-    // Kirim heartbeat ke server — dipanggil tiap iterasi loop(), terlepas dari
-    // sedang training atau idle. Sengaja tidak Serial.println tiap kali gagal,
-    // karena ini dipanggil sangat sering — kalau WiFi putus sementara, tidak
-    // perlu banjiri Serial Monitor.
-    static bool send_heartbeat(const char* server_url, int node_id) {
-        if (WiFi.status() != WL_CONNECTED) {
-            return false;
-        }
-
-        HTTPClient http;
+    static bool fetch_row_block(const char* server_url, int node_id, Matrix& out) {
         String url = String(server_url) + "?node_id=" + String(node_id);
-        http.begin(url);
-        int code = http.GET();
-        http.end();
-
-        return code == 200;
+        return fetch_matrix(url.c_str(), out);
     }
 
-    // POST minta pointer non-const (uint8_t*), padahal weights.data() dari
-    // const std::vector<float>& itu const float*. const_cast aman di sini karena
-    // HTTPClient::POST() cuma MEMBACA buffer buat dikirim, tidak pernah menulisinya.
-    static bool send_weights(const char* server_url, int node_id, const std::vector<float>& weights) {
+    static bool send_result(const char* server_url, int node_id, Matrix& result) {
         if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("[Comm] send_weights: WiFi belum konek");
+            Serial.println("[Comm] send_result: WiFi belum konek");
             return false;
         }
 
@@ -92,183 +88,20 @@ public:
         http.begin(url);
         http.addHeader("Content-Type", "application/octet-stream");
 
+        size_t payload_bytes = result.size() * sizeof(float);
         int code = http.POST(
-            reinterpret_cast<uint8_t*>(const_cast<float*>(weights.data())),
-            weights.size() * sizeof(float)
+            reinterpret_cast<uint8_t*>(result.data().data()), payload_bytes
         );
 
         bool ok = (code == 200);
         if (!ok) {
-            Serial.print("[Comm] send_weights gagal, HTTP code: ");
+            Serial.print("[Comm] send_result gagal, HTTP code: ");
             Serial.println(code);
         } else {
-            Serial.println("[Comm] send_weights sukses");
+            Serial.println("[Comm] send_result sukses");
         }
 
         http.end();
         return ok;
-    }
-
-    static bool receive_global_weights(const char* server_url, std::vector<float>& out, size_t expected_count) {
-        if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("[Comm] receive_global_weights: WiFi belum konek");
-            return false;
-        }
-
-        HTTPClient http;
-        http.begin(server_url);
-        int code = http.GET();
-
-        if (code != 200) {
-            Serial.print("[Comm] receive_global_weights gagal, HTTP code: ");
-            Serial.println(code);
-            http.end();
-            return false;
-        }
-
-        WiFiClient* stream = http.getStreamPtr();
-        int content_len = http.getSize();
-
-        size_t expected_bytes = expected_count * sizeof(float);
-        if (content_len != (int)expected_bytes) {
-            Serial.print("[Comm] receive_global_weights: ukuran payload tidak cocok, dapat ");
-            Serial.print(content_len);
-            Serial.print(" byte, harusnya ");
-            Serial.println(expected_bytes);
-            http.end();
-            return false;
-        }
-
-        // --- DEBUG: cek heap sebelum alokasi besar ---
-        Serial.print("[Comm][DEBUG] Free heap SEBELUM resize (butuh ");
-        Serial.print(expected_bytes);
-        Serial.print(" byte kontigu): ");
-        Serial.println(ESP.getFreeHeap());
-
-        out.resize(expected_count);
-
-        Serial.print("[Comm][DEBUG] Free heap SETELAH resize: ");
-        Serial.println(ESP.getFreeHeap());
-        // --- END DEBUG ---
-
-        size_t bytes_read = stream->readBytes(
-            reinterpret_cast<uint8_t*>(out.data()),
-            expected_bytes
-        );
-
-        http.end();
-
-        if (bytes_read != expected_bytes) {
-            Serial.println("[Comm] receive_global_weights: baca stream tidak lengkap");
-            return false;
-        }
-
-        Serial.println("[Comm] receive_global_weights sukses");
-        return true;
-    }
-
-    static bool receive_training_data(
-        const char* server_url,
-        int node_id,
-        size_t context_len,
-        size_t max_samples,
-        size_t& out_num_samples,
-        std::vector<uint16_t>& out_context_ids,
-        std::vector<uint16_t>& out_target_ids
-    ) {
-        if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("[Comm] receive_training_data: WiFi belum konek");
-            return false;
-        }
-
-        HTTPClient http;
-        String url = String(server_url) + "?node_id=" + String(node_id);
-        http.begin(url);
-        int code = http.GET();
-
-        if (code != 200) {
-            Serial.print("[Comm] receive_training_data gagal, HTTP code: ");
-            Serial.println(code);
-            http.end();
-            return false;
-        }
-
-        WiFiClient* stream = http.getStreamPtr();
-
-        uint8_t header_buf[4];
-        size_t header_read = stream->readBytes(header_buf, 4);
-        if (header_read != 4) {
-            Serial.println("[Comm] receive_training_data: gagal baca header");
-            http.end();
-            return false;
-        }
-        uint32_t num_samples = 0;
-        memcpy(&num_samples, header_buf, 4);
-
-        if (num_samples == 0 || num_samples > max_samples) {
-            Serial.print("[Comm] receive_training_data: num_samples tidak valid: ");
-            Serial.println(num_samples);
-            http.end();
-            return false;
-        }
-
-        size_t context_bytes = num_samples * context_len * sizeof(uint16_t);
-        out_context_ids.resize(num_samples * context_len);
-        size_t ctx_read = stream->readBytes(
-            reinterpret_cast<uint8_t*>(out_context_ids.data()), context_bytes
-        );
-        if (ctx_read != context_bytes) {
-            Serial.println("[Comm] receive_training_data: baca context_ids tidak lengkap");
-            http.end();
-            return false;
-        }
-
-        size_t target_bytes = num_samples * sizeof(uint16_t);
-        out_target_ids.resize(num_samples);
-        size_t tgt_read = stream->readBytes(
-            reinterpret_cast<uint8_t*>(out_target_ids.data()), target_bytes
-        );
-        if (tgt_read != target_bytes) {
-            Serial.println("[Comm] receive_training_data: baca target_ids tidak lengkap");
-            http.end();
-            return false;
-        }
-
-        http.end();
-        out_num_samples = num_samples;
-        Serial.print("[Comm] receive_training_data sukses, jumlah sample: ");
-        Serial.println(num_samples);
-        return true;
-    }
-
-    static bool check_training_complete(const char* server_url, bool& out_complete) {
-        if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("[Comm] check_training_complete: WiFi belum konek");
-            return false;
-        }
-
-        HTTPClient http;
-        http.begin(server_url);
-        int code = http.GET();
-
-        if (code != 200) {
-            Serial.print("[Comm] check_training_complete gagal, HTTP code: ");
-            Serial.println(code);
-            http.end();
-            return false;
-        }
-
-        WiFiClient* stream = http.getStreamPtr();
-        uint8_t flag_byte = 0;
-        size_t read_len = stream->readBytes(&flag_byte, 1);
-        http.end();
-
-        if (read_len != 1) {
-            Serial.println("[Comm] check_training_complete: gagal baca flag");
-            return false;
-        }
-
-        out_complete = (flag_byte == 1);
-        return true;
     }
 };
