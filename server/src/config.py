@@ -3,3 +3,7 @@ N = 10                  # ukuran matriks persegi — naikkan bertahap: 10, 25, 5
 NUM_NODES = 5
 ROWS_PER_NODE = N // NUM_NODES
 RANDOM_SEED = 42
+
+RESULTS_DIR = "results"
+MATRIX_DIR = "results/matrices"
+LOG_PATH = "results/log.csv"
