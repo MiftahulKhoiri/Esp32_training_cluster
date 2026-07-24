@@ -1,21 +1,18 @@
-# src/routes.py — endpoint HTTP: kirim matrix B, kirim row block A, terima hasil node
+# src/routes.py — endpoint HTTP: config, kirim matrix B, kirim row block A, terima hasil node
 import time
 from flask import Blueprint, request, Response
 import numpy as np
 
 from src import config, state, storage
-
-# Mengambil fungsi generate_matrices dari matrix_gen agar bisa mereset ronde
 from src.matrix_gen import generate_matrices 
 
 bp = Blueprint("routes", __name__)
 
 def get_node_row_info(node_id):
-    """Fungsi helper untuk menghitung jangkauan baris per node"""
+    """Fungsi helper untuk menghitung jangkauan baris per node (menangani sisa bagi)"""
     base_rows = config.N // config.NUM_NODES
     start = (node_id - 1) * base_rows
     
-    # Node terakhir mengambil semua sisa baris (sama seperti logika ESP32)
     if node_id == config.NUM_NODES:
         end = config.N
         rows_for_this_node = base_rows + (config.N % config.NUM_NODES)
@@ -25,13 +22,17 @@ def get_node_row_info(node_id):
         
     return start, end, rows_for_this_node
 
+@bp.route("/get_config", methods=["GET"])
+def get_config():
+    # Mengirim config ringkas ke ESP32 agar hemat memori (Format: "N,NUM_NODES")
+    config_data = f"{config.N},{config.NUM_NODES}"
+    return Response(config_data, status=200, mimetype="text/plain")
 
 @bp.route("/get_matrix_b", methods=["GET"])
 def get_matrix_b():
     with state.lock:
         payload = state.matrix_b.tobytes()
     return Response(payload, mimetype="application/octet-stream")
-
 
 @bp.route("/get_row_block", methods=["GET"])
 def get_row_block():
@@ -47,7 +48,6 @@ def get_row_block():
 
     return Response(payload, mimetype="application/octet-stream")
 
-
 @bp.route("/submit_result", methods=["POST"])
 def submit_result():
     node_id = request.args.get("node_id", type=int)
@@ -57,7 +57,6 @@ def submit_result():
     _, _, rows_for_this_node = get_node_row_info(node_id)
     raw = request.get_data()
     
-    # Validasi payload sekarang menyesuaikan dengan jumlah baris spesifik node tersebut
     expected_bytes = rows_for_this_node * config.N * 4
     if len(raw) != expected_bytes:
         print(f"[server] node {node_id}: ukuran payload salah, dapat {len(raw)}, harusnya {expected_bytes}")
@@ -70,7 +69,6 @@ def submit_result():
         print(f"[server] Hasil node {node_id} diterima ({len(state.results)}/{config.NUM_NODES})")
 
         if len(state.results) == config.NUM_NODES:
-            # np.vstack secara otomatis bisa menggabungkan array dengan jumlah baris berbeda
             c_actual = np.vstack([state.results[i] for i in range(1, config.NUM_NODES + 1)])
             max_diff = float(np.max(np.abs(c_actual - state.c_expected)))
             is_correct = max_diff < 1e-3
@@ -82,13 +80,12 @@ def submit_result():
             storage.save_matrices(config.N, state.matrix_a, state.matrix_b, c_actual, state.c_expected)
             storage.append_log(config.N, config.NUM_NODES, max_diff, is_correct, elapsed_sec)
             
-            # Auto-reset state agar server siap menerima komputasi ronde berikutnya tanpa di-restart
+            # Auto-reset state
             state.results.clear()
             print("[server] State di-reset. Menyiapkan ronde baru...")
             generate_matrices()
 
     return Response("OK", status=200)
-
 
 @bp.route("/status", methods=["GET"])
 def status():
