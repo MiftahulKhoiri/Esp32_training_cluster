@@ -26,8 +26,6 @@ public:
         return true;
     }
 
-    // Ambil matriks dari server, isi langsung ke Matrix `out`
-    // (out harus sudah dialokasikan sebelumnya lewat konstruktor Matrix(rows,cols)).
     static bool fetch_matrix(const char* url, Matrix& out) {
         if (WiFi.status() != WL_CONNECTED) {
             Serial.println("[Comm] fetch_matrix: WiFi belum konek");
