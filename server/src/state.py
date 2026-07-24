@@ -1,24 +1,10 @@
-# src/state.py — state global; vocab_size & param_sizes baru terisi SETELAH
-# tokenizer selesai training (lihat data_loader.load_and_split_corpus)
+# src/state.py — state global: matriks A, B, dan hasil yang lapor dari tiap node
 import threading
 
 lock = threading.Lock()
 
-vocab_size = None
-param_sizes = None
-baseline_loss = None
+matrix_a = None      # np.ndarray (N, N)
+matrix_b = None      # np.ndarray (N, N)
+c_expected = None    # np.ndarray (N, N) — referensi hasil A @ B via numpy
 
-global_weights = None
-pending_updates = {}
-round_number = 0
-round_start_time = None   # timestamp mulai kumpul weight ronde ini, None kalau belum ada yang lapor
-training_complete = False
-last_eval_loss = None
-
-node_data = {}
-eval_context = None
-eval_target = None
-
-tokenizer = None
-
-active_nodes = {}   # node_id -> timestamp heartbeat/lapor terakhir
+results = {}         # node_id -> np.ndarray (ROWS_PER_NODE, N)
