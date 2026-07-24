@@ -1,4 +1,4 @@
-// comm.h — WiFi + HTTP komunikasi ke Pi (versi komputasi paralel matmul)
+// comm.h — WiFi + HTTP komunikasi ke Pi (versi komputasi paralel matmul + Dinamis)
 #pragma once
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -24,6 +24,30 @@ public:
         Serial.print("[Comm] Terhubung, IP: ");
         Serial.println(WiFi.localIP());
         return true;
+    }
+
+    // Fungsi Baru: Ambil N dan NUM_NODES dari Server
+    static bool fetch_config(const char* url, size_t& out_N, int& out_num_nodes) {
+        if (WiFi.status() != WL_CONNECTED) return false;
+
+        HTTPClient http;
+        http.begin(url);
+        int code = http.GET();
+
+        if (code == 200) {
+            String payload = http.getString();
+            int comma_idx = payload.indexOf(',');
+            
+            if (comma_idx > 0) {
+                out_N = payload.substring(0, comma_idx).toInt();
+                out_num_nodes = payload.substring(comma_idx + 1).toInt();
+                http.end();
+                return true;
+            }
+        }
+        
+        http.end();
+        return false;
     }
 
     static bool fetch_matrix(const char* url, Matrix& out) {
