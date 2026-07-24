@@ -28,9 +28,9 @@ public:
         }
     }
 
-    // Pola beda dari error: kedip lambat 3x (dipanggil sekali saat training baru
-    // terdeteksi selesai), biar gampang dibedakan dari blink_error yang cepat.
-    static void training_done() {
+    // Pola beda dari error: kedip lambat 3x (dipanggil sekali saat satu
+    // tugas komputasi selesai), biar gampang dibedakan dari blink_error yang cepat.
+    static void task_done() {
         for (int i = 0; i < 3; ++i) {
             digitalWrite(LED_PIN, HIGH);
             delay(500);
