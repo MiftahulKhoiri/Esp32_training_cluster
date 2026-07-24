@@ -5,7 +5,25 @@ import numpy as np
 
 from src import config, state, storage
 
+# Mengambil fungsi generate_matrices dari matrix_gen agar bisa mereset ronde
+from src.matrix_gen import generate_matrices 
+
 bp = Blueprint("routes", __name__)
+
+def get_node_row_info(node_id):
+    """Fungsi helper untuk menghitung jangkauan baris per node"""
+    base_rows = config.N // config.NUM_NODES
+    start = (node_id - 1) * base_rows
+    
+    # Node terakhir mengambil semua sisa baris (sama seperti logika ESP32)
+    if node_id == config.NUM_NODES:
+        end = config.N
+        rows_for_this_node = base_rows + (config.N % config.NUM_NODES)
+    else:
+        end = start + base_rows
+        rows_for_this_node = base_rows
+        
+    return start, end, rows_for_this_node
 
 
 @bp.route("/get_matrix_b", methods=["GET"])
@@ -21,8 +39,7 @@ def get_row_block():
     if node_id is None or not (1 <= node_id <= config.NUM_NODES):
         return Response("node_id tidak valid", status=400)
 
-    start = (node_id - 1) * config.ROWS_PER_NODE
-    end = start + config.ROWS_PER_NODE
+    start, end, _ = get_node_row_info(node_id)
 
     with state.lock:
         block = state.matrix_a[start:end, :]
@@ -37,30 +54,38 @@ def submit_result():
     if node_id is None or not (1 <= node_id <= config.NUM_NODES):
         return Response("node_id tidak valid", status=400)
 
+    _, _, rows_for_this_node = get_node_row_info(node_id)
     raw = request.get_data()
-    expected_bytes = config.ROWS_PER_NODE * config.N * 4
+    
+    # Validasi payload sekarang menyesuaikan dengan jumlah baris spesifik node tersebut
+    expected_bytes = rows_for_this_node * config.N * 4
     if len(raw) != expected_bytes:
         print(f"[server] node {node_id}: ukuran payload salah, dapat {len(raw)}, harusnya {expected_bytes}")
         return Response("ukuran payload tidak cocok", status=400)
 
-    block = np.frombuffer(raw, dtype=np.float32).reshape(config.ROWS_PER_NODE, config.N)
+    block = np.frombuffer(raw, dtype=np.float32).reshape(rows_for_this_node, config.N)
 
     with state.lock:
         state.results[node_id] = block
         print(f"[server] Hasil node {node_id} diterima ({len(state.results)}/{config.NUM_NODES})")
 
         if len(state.results) == config.NUM_NODES:
+            # np.vstack secara otomatis bisa menggabungkan array dengan jumlah baris berbeda
             c_actual = np.vstack([state.results[i] for i in range(1, config.NUM_NODES + 1)])
             max_diff = float(np.max(np.abs(c_actual - state.c_expected)))
             is_correct = max_diff < 1e-3
             elapsed_sec = time.time() - state.round_start_time
 
-            print(f"[server] SEMUA NODE SELESAI. Max diff vs numpy: {max_diff:.6f}, "
-                  f"elapsed: {elapsed_sec:.3f}s")
+            print(f"[server] SEMUA NODE SELESAI. Max diff vs numpy: {max_diff:.6f}, elapsed: {elapsed_sec:.3f}s")
             print("[server] BENAR!" if is_correct else "[server] ADA SELISIH, cek urutan/tipe data")
 
             storage.save_matrices(config.N, state.matrix_a, state.matrix_b, c_actual, state.c_expected)
             storage.append_log(config.N, config.NUM_NODES, max_diff, is_correct, elapsed_sec)
+            
+            # Auto-reset state agar server siap menerima komputasi ronde berikutnya tanpa di-restart
+            state.results.clear()
+            print("[server] State di-reset. Menyiapkan ronde baru...")
+            generate_matrices()
 
     return Response("OK", status=200)
 
@@ -71,7 +96,6 @@ def status():
         info = {
             "N": config.N,
             "num_nodes": config.NUM_NODES,
-            "rows_per_node": config.ROWS_PER_NODE,
             "nodes_reported": list(state.results.keys()),
         }
     return info
