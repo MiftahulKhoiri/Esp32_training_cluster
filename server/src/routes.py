@@ -1,8 +1,9 @@
 # src/routes.py — endpoint HTTP: kirim matrix B, kirim row block A, terima hasil node
+import time
 from flask import Blueprint, request, Response
 import numpy as np
 
-from src import config, state
+from src import config, state, storage
 
 bp = Blueprint("routes", __name__)
 
@@ -51,8 +52,15 @@ def submit_result():
         if len(state.results) == config.NUM_NODES:
             c_actual = np.vstack([state.results[i] for i in range(1, config.NUM_NODES + 1)])
             max_diff = float(np.max(np.abs(c_actual - state.c_expected)))
-            print(f"[server] SEMUA NODE SELESAI. Max diff vs numpy: {max_diff:.6f}")
-            print("[server] BENAR!" if max_diff < 1e-3 else "[server] ADA SELISIH, cek urutan/tipe data")
+            is_correct = max_diff < 1e-3
+            elapsed_sec = time.time() - state.round_start_time
+
+            print(f"[server] SEMUA NODE SELESAI. Max diff vs numpy: {max_diff:.6f}, "
+                  f"elapsed: {elapsed_sec:.3f}s")
+            print("[server] BENAR!" if is_correct else "[server] ADA SELISIH, cek urutan/tipe data")
+
+            storage.save_matrices(config.N, state.matrix_a, state.matrix_b, c_actual, state.c_expected)
+            storage.append_log(config.N, config.NUM_NODES, max_diff, is_correct, elapsed_sec)
 
     return Response("OK", status=200)
 
