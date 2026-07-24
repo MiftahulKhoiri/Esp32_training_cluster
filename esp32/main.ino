@@ -16,7 +16,7 @@ const int   NODE_ID    = 1; // GANTI: 1-5, beda tiap board
 const int   NUM_NODES  = 5;
 
 // ===== UBAH CUMA INI UNTUK NAIKKAN UKURAN UJI =====
-const size_t N = 10; // ukuran matriks persegi — naikkan bertahap: 10, 25, 50, 75, 100, 150, 200...
+const size_t N = 10; 
 
 Matrix matrix_b;
 Matrix row_block_a;
@@ -42,8 +42,13 @@ void setup() {
     StatusLed::init();
     heap_checkpoint("awal boot, sebelum alokasi apapun");
 
+    // PERBAIKAN: Hitung beban baris dengan mempertimbangkan sisa pembagian
+    size_t base_rows = N / NUM_NODES;
+    size_t remainder = N % NUM_NODES;
+    // Node terakhir akan menanggung sisa baris agar tidak ada baris yang terlewat
+    size_t rows_per_node = (NODE_ID == NUM_NODES) ? (base_rows + remainder) : base_rows;
+
     // Alokasi matriks kerja SEBELUM WiFi connect — heap masih bersih
-    size_t rows_per_node = N / NUM_NODES;
     matrix_b     = Matrix(N, N, 0.0f);
     row_block_a  = Matrix(rows_per_node, N, 0.0f);
     result_block = Matrix(rows_per_node, N, 0.0f);
@@ -94,10 +99,10 @@ void setup() {
     Serial.println("[main] Hasil terkirim, node selesai");
     heap_checkpoint("akhir, setelah kirim hasil");
 
-    StatusLed::task_done(); // dipakai sebagai pola kedip lambat 3x = tanda tugas selesai
+    StatusLed::task_done(); 
     StatusLed::idle();
 }
 
 void loop() {
-    delay(10000); // tugas selesai di setup(), loop kosong
+    delay(10000); 
 }
