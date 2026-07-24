@@ -94,7 +94,7 @@ void setup() {
     Serial.println("[main] Hasil terkirim, node selesai");
     heap_checkpoint("akhir, setelah kirim hasil");
 
-    StatusLed::training_done(); // dipakai sebagai pola kedip lambat 3x = tanda tugas selesai
+    StatusLed::task_done(); // dipakai sebagai pola kedip lambat 3x = tanda tugas selesai
     StatusLed::idle();
 }
 
