@@ -1,201 +1,157 @@
-// main.ino — sketch utama, siklus federated learning per node
-#include <WiFi.h>        
-// <-- TAMBAHAN: biar ArduinoDroid link library WiFi
+// matmul_node.ino — node komputasi paralel: hitung blok baris A x B
+#include <WiFi.h>
 #include <HTTPClient.h>
+#include "esp_heap_caps.h"
 #include "matrix_ops.h"
-#include "dense_layer.h"
-#include "losses.h"
-#include "trainer.h"
-#include "comm.h"
-#include "status_led.h"
 
-// ===== KONFIGURASI — SESUAIKAN PER NODE =====
 const char* WIFI_SSID     = "wifi server";
 const char* WIFI_PASSWORD = "1234rewq";
-const char* PI_SERVER_UPLOAD    = "http://192.168.1.2:5000/upload_weights";
-const char* PI_SERVER_GLOBAL    = "http://192.168.1.2:5000/get_global_weights";
-const char* PI_SERVER_DATA      = "http://192.168.1.2:5000/get_training_data";
-const char* PI_SERVER_STATUS    = "http://192.168.1.2:5000/training_status_flag";
-const char* PI_SERVER_VOCAB     = "http://192.168.1.2:5000/vocab_size";
-const char* PI_SERVER_HEARTBEAT = "http://192.168.1.2:5000/heartbeat";
-const int   NODE_ID = 1; // GANTI: 1-5, beda tiap board
+const char* PI_SERVER_MATRIX_B  = "http://192.168.1.2:5000/get_matrix_b";
+const char* PI_SERVER_ROW_BLOCK = "http://192.168.1.2:5000/get_row_block";
+const char* PI_SERVER_RESULT    = "http://192.168.1.2:5000/submit_result";
+const int   NODE_ID    = 1; // GANTI: 1-5, beda tiap board
+const int   NUM_NODES  = 5;
 
-// ===== ARSITEKTUR MODEL =====
-const size_t CONTEXT_LEN  = 8;
-size_t VOCAB_SIZE = 0;
-const size_t HIDDEN_DIM   = 64;
-const size_t INPUT_DIM    = CONTEXT_LEN;
-const size_t MAX_SAMPLES  = 300;
+// ===== UBAH CUMA INI UNTUK NAIKKAN UKURAN UJI =====
+const size_t N = 10; // ukuran matriks persegi — naikkan bertahap: 10, 25, 50, 75, 100, 150, 200...
 
-// ===== FEDERATED CONFIG =====
-const int    LOCAL_EPOCHS      = 3;
-const size_t BATCH_SIZE        = 8;
-const float  LEARNING_RATE     = 0.01f;
-const uint32_t ROUND_INTERVAL_MS = 30000;
-const uint32_t STATUS_CHECK_INTERVAL_MS = 10000;
+Matrix matrix_b;
+Matrix row_block_a;
+Matrix result_block;
 
-SimpleMLP model;
-Matrix train_inputs;
-std::vector<uint16_t> train_targets;
-size_t num_samples = 0;
-bool training_finished = false;
+void heap_checkpoint(const char* label) {
+    Serial.print("[HEAP][");
+    Serial.print(label);
+    Serial.print("] free=");
+    Serial.print(ESP.getFreeHeap());
+    Serial.print(" largest_block=");
+    Serial.print(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    Serial.print(" integrity=");
+    bool ok = heap_caps_check_integrity_all(true);
+    Serial.println(ok ? "OK" : "CORRUPT!!");
+}
 
-// PENTING: SATU buffer weight global saja, dialokasikan SEKALI di setup().
-// Dipakai bolak-balik: terima global weight dari Pi -> set ke model -> training
-// -> timpa isi buffer yang SAMA dengan hasil training lokal -> kirim ke Pi.
-// Awalnya ada dua buffer terpisah (global_weights + local_weights, total 108KB
-// permanen) — itu salah satu penyebab heap ESP32 kelebihan beban. Reuse satu
-// buffer menghemat ~54KB permanen tanpa mengubah alur logika sama sekali,
-// karena isi lama sudah tidak dibutuhkan begitu training round berikutnya mulai.
-std::vector<float> weights_buffer;
-
-bool load_local_data() {
-    std::vector<uint16_t> context_ids;
-    std::vector<uint16_t> target_ids;
-
-    bool ok = Comm::receive_training_data(
-        PI_SERVER_DATA, NODE_ID, CONTEXT_LEN, MAX_SAMPLES,
-        num_samples, context_ids, target_ids
-    );
-    if (!ok) {
-        Serial.println("[main] Gagal ambil training data dari server");
-        return false;
+bool connect_wifi() {
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.print("[node] Connecting WiFi");
+    int retry = 0;
+    while (WiFi.status() != WL_CONNECTED && retry < 30) {
+        delay(500);
+        Serial.print(".");
+        retry++;
     }
-
-    train_inputs = Matrix(num_samples, INPUT_DIM, 0.0f);
-    train_targets.resize(num_samples);
-
-    for (size_t i = 0; i < num_samples; ++i) {
-        for (size_t c = 0; c < CONTEXT_LEN; ++c) {
-            uint16_t token_id = context_ids[i * CONTEXT_LEN + c];
-            train_inputs(i, c) = static_cast<float>(token_id) / VOCAB_SIZE;
-        }
-        train_targets[i] = target_ids[i];
-    }
-
-    Serial.print("[main] Data dari server dimuat, jumlah sample: ");
-    Serial.println(num_samples);
+    Serial.println();
+    if (WiFi.status() != WL_CONNECTED) return false;
+    Serial.print("[node] WiFi connected, IP: ");
+    Serial.println(WiFi.localIP());
     return true;
 }
 
-void build_model() {
-    model.layers.clear();
-    model.layers.push_back(DenseLayer(INPUT_DIM, HIDDEN_DIM, ActivationType::RELU));
-    model.layers.push_back(DenseLayer(HIDDEN_DIM, VOCAB_SIZE, ActivationType::SOFTMAX));
-    Serial.print("[main] Model dibangun, total param: ");
-    Serial.println(model.total_param_count());
+bool fetch_matrix(const char* url, Matrix& out) {
+    HTTPClient http;
+    http.begin(url);
+    int code = http.GET();
+    if (code != 200) {
+        Serial.printf("[node] GET %s gagal, kode=%d\n", url, code);
+        http.end();
+        return false;
+    }
+    WiFiClient* stream = http.getStreamPtr();
+    size_t expected_bytes = out.size() * sizeof(float);
+    size_t total_len = http.getSize();
+    if (total_len != expected_bytes) {
+        Serial.printf("[node] Ukuran payload tidak cocok: expected=%u got=%u\n",
+                      (unsigned)expected_bytes, (unsigned)total_len);
+        http.end();
+        return false;
+    }
+    size_t read_bytes = stream->readBytes(
+        reinterpret_cast<uint8_t*>(out.data().data()), expected_bytes
+    );
+    http.end();
+    if (read_bytes != expected_bytes) {
+        Serial.println("[node] Baca stream tidak lengkap");
+        return false;
+    }
+    return true;
 }
 
-bool run_federated_round() {
-    size_t param_count = model.total_param_count();
+bool fetch_row_block() {
+    String url = String(PI_SERVER_ROW_BLOCK) + "?node_id=" + NODE_ID;
+    return fetch_matrix(url.c_str(), row_block_a);
+}
 
-    StatusLed::working();
-    if (!Comm::receive_global_weights(PI_SERVER_GLOBAL, weights_buffer, param_count)) {
-        Serial.println("[main] Gagal ambil global weight, skip ronde ini");
-        StatusLed::blink_error();
-        StatusLed::idle();
-        return false;
-    }
-    if (!model.set_weights_flat(weights_buffer)) {
-        Serial.println("[main] Gagal set weight ke model");
-        StatusLed::blink_error();
-        StatusLed::idle();
-        return false;
-    }
-
-    float final_loss = Trainer::train_local_epochs(
-        model, train_inputs, train_targets.data(), num_samples,
-        LOCAL_EPOCHS, BATCH_SIZE, LEARNING_RATE
+bool send_result() {
+    HTTPClient http;
+    String url = String(PI_SERVER_RESULT) + "?node_id=" + NODE_ID;
+    http.begin(url);
+    http.addHeader("Content-Type", "application/octet-stream");
+    size_t payload_bytes = result_block.size() * sizeof(float);
+    int code = http.POST(
+        reinterpret_cast<uint8_t*>(result_block.data().data()), payload_bytes
     );
-    Serial.print("[main] Selesai training lokal, loss akhir: ");
-    Serial.println(final_loss);
-
-    // Buffer yang sama ditimpa dengan hasil training lokal — isi lama
-    // (global weight yang sudah diserap ke model) sudah tidak dibutuhkan.
-    model.get_weights_flat(weights_buffer);
-    if (!Comm::send_weights(PI_SERVER_UPLOAD, NODE_ID, weights_buffer)) {
-        Serial.println("[main] Gagal kirim weight ke Pi");
-        StatusLed::blink_error();
-        StatusLed::idle();
+    http.end();
+    if (code != 200) {
+        Serial.printf("[node] POST hasil gagal, kode=%d\n", code);
         return false;
     }
-
-    StatusLed::idle();
     return true;
 }
 
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    Serial.println("[main] Boot node federated learning");
+    Serial.printf("[node] Boot node matmul paralel, N=%u\n", (unsigned)N);
 
-    StatusLed::init();
-    randomSeed(analogRead(0));
+    heap_checkpoint("awal boot, sebelum alokasi apapun");
 
-    StatusLed::working();
-    if (!Comm::connect_wifi(WIFI_SSID, WIFI_PASSWORD)) {
-        Serial.println("[main] WiFi gagal, restart ESP32...");
-        StatusLed::blink_error();
+    // Alokasi matriks kerja SEBELUM WiFi connect — heap masih bersih
+    size_t rows_per_node = N / NUM_NODES;
+    matrix_b     = Matrix(N, N, 0.0f);
+    row_block_a  = Matrix(rows_per_node, N, 0.0f);
+    result_block = Matrix(rows_per_node, N, 0.0f);
+
+    heap_checkpoint("setelah alokasi matrix_b + row_block_a + result_block");
+
+    if (!connect_wifi()) {
+        Serial.println("[node] WiFi gagal, restart...");
         delay(3000);
         ESP.restart();
     }
 
-    while (!Comm::fetch_vocab_size(PI_SERVER_VOCAB, VOCAB_SIZE) || VOCAB_SIZE == 0) {
-        Serial.println("[main] Retry ambil vocab_size dalam 5 detik...");
-        StatusLed::blink_error();
-        delay(5000);
+    heap_checkpoint("setelah WiFi connect");
+
+    while (!fetch_matrix(PI_SERVER_MATRIX_B, matrix_b)) {
+        Serial.println("[node] Retry ambil matrix B dalam 3 detik...");
+        delay(3000);
     }
+    Serial.println("[node] Matrix B diterima");
+    heap_checkpoint("setelah fetch matrix B");
 
-    build_model();
-
-    // Alokasi SATU buffer weight sekali di sini, saat heap masih paling bersih.
-    size_t param_count = model.total_param_count();
-    weights_buffer.reserve(param_count);
-    weights_buffer.resize(param_count);
-    Serial.print("[main] Buffer weight dialokasikan sekali, param_count: ");
-    Serial.println(param_count);
-    Serial.print("[main] Free heap setelah alokasi buffer: ");
-    Serial.println(ESP.getFreeHeap());
-
-    while (!load_local_data()) {
-        Serial.println("[main] Retry ambil training data dalam 5 detik...");
-        StatusLed::blink_error();
-        delay(5000);
+    while (!fetch_row_block()) {
+        Serial.println("[node] Retry ambil row block A dalam 3 detik...");
+        delay(3000);
     }
+    Serial.println("[node] Row block A diterima");
+    heap_checkpoint("setelah fetch row block A");
 
-    Comm::send_heartbeat(PI_SERVER_HEARTBEAT, NODE_ID); // kabari server: node ini hidup, dari awal
+    unsigned long t0 = millis();
+    if (!row_block_a.matmul(matrix_b, result_block)) {
+        Serial.println("[node] matmul gagal!");
+        return;
+    }
+    unsigned long t1 = millis();
+    Serial.printf("[node] Matmul selesai dalam %lu ms\n", t1 - t0);
+    heap_checkpoint("setelah matmul selesai");
 
-    StatusLed::idle();
+    while (!send_result()) {
+        Serial.println("[node] Retry kirim hasil dalam 3 detik...");
+        delay(3000);
+    }
+    Serial.println("[node] Hasil terkirim, node selesai");
+    heap_checkpoint("akhir, setelah kirim hasil");
 }
 
 void loop() {
-    // Heartbeat SELALU dikirim tiap loop, terlepas status training — ini yang
-    // bikin server tahu node ini masih hidup walau lagi idle nunggu ronde lain.
-    Comm::send_heartbeat(PI_SERVER_HEARTBEAT, NODE_ID);
-
-    bool is_complete = false;
-    bool status_ok = Comm::check_training_complete(PI_SERVER_STATUS, is_complete);
-
-    if (status_ok && is_complete) {
-        if (!training_finished) {
-            Serial.println("[main] *** TRAINING SELESAI menurut server — berhenti training, node idle ***");
-            StatusLed::training_done();
-            training_finished = true;
-        }
-        StatusLed::idle();
-        delay(STATUS_CHECK_INTERVAL_MS);
-        return;
-    }
-
-    if (status_ok && !is_complete && training_finished) {
-        Serial.println("[main] Training di server aktif lagi, node lanjut ikut training");
-        training_finished = false;
-    }
-
-    Serial.println("[main] === Mulai ronde federated ===");
-    run_federated_round();
-    Serial.print("[main] Ronde selesai, tunggu ");
-    Serial.print(ROUND_INTERVAL_MS / 1000);
-    Serial.println(" detik...");
-    delay(ROUND_INTERVAL_MS);
+    delay(10000);
 }
