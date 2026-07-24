@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstdint>
 #include <cmath>
+#include <algorithm> // Tambahan untuk std::fill
 #include <Arduino.h>
 
 class Matrix {
@@ -25,27 +26,34 @@ public:
         return data_[r * cols_ + c];
     }
 
-    // Akses raw buffer — dipakai nanti untuk serialize weight ke Pi (FedAvg)
     const std::vector<Scalar>& data() const { return data_; }
     std::vector<Scalar>& data() { return data_; }
 
     static Matrix random_uniform(size_t rows, size_t cols, Scalar scale) {
         Matrix m(rows, cols);
         for (size_t i = 0; i < m.data_.size(); ++i) {
-            // random(-1000,1000)/1000.0 -> [-1,1], lalu diskalakan
             float r = (static_cast<float>(random(-1000, 1000)) / 1000.0f);
             m.data_[i] = r * scale;
         }
         return m;
     }
 
-    // out = this * other  (matmul biasa, tanpa cache-blocking — matriks kecil di ESP32)
     bool matmul(const Matrix& other, Matrix& out) const {
         if (cols_ != other.rows_) {
             Serial.println("[Matrix] matmul: dimensi tidak cocok");
             return false;
         }
-        out = Matrix(rows_, other.cols_, 0.0f);
+        
+        // PERBAIKAN: Jangan buat objek Matrix baru.
+        // Pastikan dimensi output sesuai dengan alokasi awal di main.ino
+        if (out.rows() != rows_ || out.cols() != other.cols_) {
+            Serial.println("[Matrix] matmul: dimensi output tidak sesuai alokasi awal");
+            return false;
+        }
+
+        // PERBAIKAN: Bersihkan nilai sebelumnya menjadi 0 tanpa membuang alokasi memori
+        std::fill(out.data().begin(), out.data().end(), 0.0f);
+
         for (size_t i = 0; i < rows_; ++i) {
             for (size_t k = 0; k < cols_; ++k) {
                 Scalar a_ik = (*this)(i, k);
@@ -58,7 +66,6 @@ public:
         return true;
     }
 
-    // Transpose
     Matrix transpose() const {
         Matrix out(cols_, rows_);
         for (size_t i = 0; i < rows_; ++i)
@@ -67,7 +74,6 @@ public:
         return out;
     }
 
-    // Elementwise add (in-place ke this)
     bool add_inplace(const Matrix& other) {
         if (rows_ != other.rows_ || cols_ != other.cols_) {
             Serial.println("[Matrix] add_inplace: dimensi tidak cocok");
@@ -77,12 +83,10 @@ public:
         return true;
     }
 
-    // Scale in-place (dipakai buat SGD update: w -= lr * grad)
     void scale_inplace(Scalar s) {
         for (auto& v : data_) v *= s;
     }
 
-    // Tambah bias per-baris (broadcast 1 x cols ke rows x cols)
     bool add_bias_broadcast(const Matrix& bias) {
         if (bias.rows_ != 1 || bias.cols_ != cols_) {
             Serial.println("[Matrix] add_bias_broadcast: dimensi bias salah");
